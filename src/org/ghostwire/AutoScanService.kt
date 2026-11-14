@@ -103,7 +103,7 @@ class AutoScanService : Service() {
             val state = if (isEnabled(ctx)) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
             else PackageManager.COMPONENT_ENABLED_STATE_DISABLED
             ctx.packageManager.setComponentEnabledSetting(
-                ComponentName(ctx, "org.ghostwire.NfcAutoScan"), state, PackageManager.DONT_KILL_APP,
+                ComponentName(ctx, "org.ghostwire.NfcCaptureActivity"), state, PackageManager.DONT_KILL_APP,
             )
         }
 

@@ -59,7 +59,8 @@ class WalrusFragment : Fragment() {
     private lateinit var status: TextView
     private var nfc: NfcAdapter? = null
     private var keys: List<ByteArray> = emptyList()
-    @Volatile private var capturing = false
+    @Volatile private var readerOn = false      // reader mode currently enabled
+    @Volatile private var captureArmed = false  // user pressed "Read card" (one-shot save)
     @Volatile private var writeTarget: Card? = null
 
     private val importPicker =
@@ -102,12 +103,10 @@ class WalrusFragment : Fragment() {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                         notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
                     AutoScanService.start(requireContext())
-                    startCapture()
                 } else {
                     AutoScanService.stop(requireContext())
-                    stopCapture()
-                    updateStatus()
                 }
+                updateStatus()
             }
         }
         updateStatus()
@@ -115,16 +114,23 @@ class WalrusFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        if (autoScan()) startCapture() // re-arm reader mode on return to foreground
+        // Hold reader mode the whole time this screen is up: it keeps NFC under
+        // the app's control (so the OS plays no discovery sound, honouring the
+        // mute toggle) and lets a tap be saved on demand. Saving still only
+        // happens when capture is armed, a write is pending, or auto-scan is on.
+        enableReader()
     }
 
     override fun onPause() {
         super.onPause()
-        stopCapture()
-        // "other"-category HCE only answers in the foreground anyway; disarm so
-        // a backgrounded app never holds a card armed and the status is honest.
+        disableReader()
         CardEmulator.disarm()
         nfc?.let { Sniffer.stop(requireActivity(), it) }
+    }
+
+    /** Re-arm reader mode so a changed mute flag takes effect immediately. */
+    fun onMuteChanged() {
+        if (readerOn) { disableReader(); enableReader() }
     }
 
     private fun updateStatus() {
@@ -133,22 +139,28 @@ class WalrusFragment : Fragment() {
             nfc?.isEnabled == false -> "NFC is off — enable it in system settings"
             CardEmulator.isArmed() -> "Emulating \"${CardEmulator.armedName}\" — hold the phone to a reader"
             writeTarget != null -> "Hold a blank/writable tag to the phone to write \"${writeTarget?.name}\"…"
-            capturing -> "Tap a card to the phone…"
+            captureArmed -> "Tap a card to the phone…"
             else -> "${cards.size} card(s) saved"
         }
     }
 
-    private fun startCapture() = startReaderMode(target = null)
+    /** Arms a one-shot save: the next tap is captured and saved. */
+    private fun startCapture() {
+        captureArmed = true
+        enableReader()
+        updateStatus()
+    }
 
     /** Arms write mode: the next tag tapped gets [card]'s data written to it. */
-    private fun startWrite(card: Card) = startReaderMode(target = card)
-
-    private fun startReaderMode(target: Card?) {
-        val a = nfc ?: return updateStatus()
-        if (!a.isEnabled) return updateStatus()
-        writeTarget = target
-        capturing = true
+    private fun startWrite(card: Card) {
+        writeTarget = card
+        enableReader()
         updateStatus()
+    }
+
+    private fun enableReader() {
+        val a = nfc ?: return
+        if (!a.isEnabled) return
         a.enableReaderMode(
             requireActivity(), { tag -> onTag(tag) },
             NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
@@ -156,14 +168,16 @@ class WalrusFragment : Fragment() {
                 (if (AppPrefs.muted(requireContext())) NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS else 0),
             null,
         )
+        readerOn = true
     }
 
-    private fun stopCapture() {
-        if (capturing) {
-            capturing = false
+    private fun disableReader() {
+        if (readerOn) {
+            readerOn = false
             runCatching { nfc?.disableReaderMode(requireActivity()) }
         }
         writeTarget = null
+        captureArmed = false
     }
 
     // Runs on an NFC binder thread.
@@ -173,18 +187,25 @@ class WalrusFragment : Fragment() {
             val result = runCatching { NfcCapture.write(tag, target, keys) }
                 .getOrElse { "write failed: ${it.message}" }
             activity?.runOnUiThread {
-                stopCapture()
+                writeTarget = null  // reader stays on
                 status.text = result
-                if (autoScan()) startCapture() // back to reading
             }
+            return
+        }
+        // Only save when the user asked for it; otherwise swallow the tap (reader
+        // mode already kept the OS from making a sound or launching a handler).
+        if (!captureArmed && !autoScan()) {
+            activity?.runOnUiThread { status.text = "card detected — press Read card to save it" }
             return
         }
         val card = runCatching {
             NfcCapture.read(tag, keys) { msg -> activity?.runOnUiThread { status.text = msg } }
-        }.getOrNull()
+        }.getOrNull()?.let {
+            val loc = Loc.last(requireContext())
+            if (loc != null) it.copy(lat = loc.first, lon = loc.second) else it
+        }
         activity?.runOnUiThread {
-            // When auto-scan is on, leave reader mode armed so taps chain.
-            if (!autoScan()) stopCapture()
+            captureArmed = false  // one-shot consumed
             if (card != null) {
                 cards.add(0, card)
                 store.save(cards)
@@ -192,7 +213,7 @@ class WalrusFragment : Fragment() {
                 status.text = if (card.keys.isNotEmpty())
                     "saved — recovered ${card.keys.size} sector key(s) from the dictionary"
                 else "${cards.size} card(s) saved"
-            } else if (!autoScan()) {
+            } else {
                 updateStatus()
             }
         }
@@ -244,7 +265,7 @@ class WalrusFragment : Fragment() {
      *  explanation instead of a tag that would not match. */
     private fun startEmulate(card: Card) {
         if (nfc == null) {
-            AlertDialog.Builder(requireContext())
+            MaterialAlertDialogBuilder(requireContext())
                 .setTitle("Emulate")
                 .setMessage("This device has no NFC.")
                 .setPositiveButton("OK", null)
@@ -252,10 +273,10 @@ class WalrusFragment : Fragment() {
             return
         }
         // Reading and emulating can't run at once; drop reader mode first.
-        stopCapture()
+        disableReader()
         val plan = CardEmulator.arm(card)
         if (plan.mode != CardEmulator.Mode.NDEF) {
-            AlertDialog.Builder(requireContext())
+            MaterialAlertDialogBuilder(requireContext())
                 .setTitle("Can't emulate this card")
                 .setMessage(plan.reason)
                 .setPositiveButton("OK", null)
@@ -264,7 +285,7 @@ class WalrusFragment : Fragment() {
             return
         }
         updateStatus()
-        AlertDialog.Builder(requireContext())
+        MaterialAlertDialogBuilder(requireContext())
             .setTitle("Emulating \"${card.name}\"")
             .setMessage(
                 "${plan.reason}.\n\n" +
@@ -276,6 +297,7 @@ class WalrusFragment : Fragment() {
             .setCancelable(false)
             .setPositiveButton("Stop") { _, _ ->
                 CardEmulator.disarm()
+                enableReader()
                 updateStatus()
             }
             .show()
@@ -301,19 +323,19 @@ class WalrusFragment : Fragment() {
             }
         }
         if (err != null) {
-            AlertDialog.Builder(requireContext())
+            MaterialAlertDialogBuilder(requireContext())
                 .setTitle("Sniff unavailable")
                 .setMessage("Observe mode can't start: $err.")
                 .setPositiveButton("OK", null)
                 .show()
             return
         }
-        AlertDialog.Builder(requireContext())
-            .setTitle("Sniffing (observe mode)")
-            .setView(android.widget.ScrollView(requireContext()).apply { addView(log) })
+        MaterialAlertDialogBuilder(requireContext())
+            .setView(view)
             .setCancelable(false)
             .setPositiveButton("Stop") { _, _ ->
                 Sniffer.stop(requireActivity(), a)
+                enableReader()
                 updateStatus()
             }
             .show()
@@ -355,6 +377,8 @@ class WalrusFragment : Fragment() {
         if (card.keys.isNotEmpty()) sb.append("\nKeys:  ${card.keys.size} sector(s) recovered")
         if (card.ndef.isNotEmpty()) { sb.append("\nNDEF:"); card.ndef.forEach { sb.append("\n  $it") } }
         if (card.extra.isNotEmpty()) card.extra.forEach { sb.append("\n  $it") }
+        if (card.lat != null && card.lon != null)
+            sb.append("\nGPS:   %.6f, %.6f".format(card.lat, card.lon))
         return sb.toString()
     }
 

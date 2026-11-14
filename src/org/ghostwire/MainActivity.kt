@@ -38,6 +38,7 @@ import androidx.viewpager2.widget.ViewPager2
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import com.google.android.material.tabs.TabLayout
 import com.google.android.material.tabs.TabLayoutMediator
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
 /**
  * GhostWire shell. The bottom bar switches capability domain (always visible, one
@@ -107,6 +108,11 @@ class MainActivity : AppCompatActivity() {
                 R.id.action_sound -> {
                     AppPrefs.setMuted(this, !AppPrefs.muted(this))
                     showSoundState()
+                    // Re-arm reader mode on the open Walrus screen so the new
+                    // mute flag takes effect without leaving the tab.
+                    supportFragmentManager.fragments.forEach {
+                        (it as? WalrusFragment)?.onMuteChanged()
+                    }
                     true
                 }
                 else -> false
@@ -142,7 +148,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showAccentDialog() {
         val names = accents.map { it.name }.toTypedArray()
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Accent colour")
             .setSingleChoiceItems(names, accentIndex()) { dlg, which ->
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_ACCENT, which).apply()

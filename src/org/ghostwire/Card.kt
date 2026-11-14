@@ -44,6 +44,8 @@ data class Card(
     val extra: List<String> = emptyList(),   // protocol-specific findings (EMV/DESFire/FeliCa/…)
     var notes: String = "",
     val ndefRaw: String? = null, // raw NdefMessage bytes (hex) — lets write() replay it verbatim
+    val lat: Double? = null,     // where the card was captured (fine location, if granted)
+    val lon: Double? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
@@ -61,6 +63,8 @@ data class Card(
         put("extra", JSONArray(extra))
         put("notes", notes)
         put("ndefRaw", ndefRaw ?: JSONObject.NULL)
+        put("lat", lat ?: JSONObject.NULL)
+        put("lon", lon ?: JSONObject.NULL)
     }
 
     companion object {
@@ -81,6 +85,8 @@ data class Card(
                 o.strOrNull("atqa"), o.strOrNull("sak"), o.strOrNull("ats"),
                 o.optString("typeLabel"), blocks, ndef, keys, extra, o.optString("notes"),
                 o.strOrNull("ndefRaw"),
+                if (o.isNull("lat")) null else o.optDouble("lat"),
+                if (o.isNull("lon")) null else o.optDouble("lon"),
             )
         }
 

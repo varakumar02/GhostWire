@@ -306,14 +306,11 @@ class WalrusFragment : Fragment() {
     /** Observe mode: list the polling frames nearby readers send until Stop. */
     private fun startSniff() {
         val a = nfc ?: return updateStatus()
-        stopCapture()
+        disableReader()
         CardEmulator.disarm()
-        val log = TextView(requireContext()).apply {
-            setTextIsSelectable(true)
-            typeface = android.graphics.Typeface.MONOSPACE
-            setPadding(48, 24, 48, 24)
-            text = "Listening — hold the phone near a reader…\n"
-        }
+        val view = LayoutInflater.from(requireContext()).inflate(R.layout.dialog_sniff, null)
+        val log = view.findViewById<TextView>(R.id.sniff_log)
+        log.text = "Listening — hold the phone near a reader…"
         val lines = ArrayDeque<String>()
         val err = Sniffer.start(requireActivity(), a) { line ->
             activity?.runOnUiThread {
@@ -357,10 +354,11 @@ class WalrusFragment : Fragment() {
 
             Some limits are universal; others depend on this phone's NFC controller and secure element.
         """.trimIndent()
-        AlertDialog.Builder(requireContext())
-            .setTitle("NFC limits")
-            .setMessage(msg)
-            .setPositiveButton("OK", null)
+        val view = LayoutInflater.from(requireContext()).inflate(R.layout.dialog_limits, null)
+        view.findViewById<TextView>(R.id.limits_text).text = msg
+        MaterialAlertDialogBuilder(requireContext())
+            .setView(view)
+            .setPositiveButton("Close", null)
             .show()
     }
 

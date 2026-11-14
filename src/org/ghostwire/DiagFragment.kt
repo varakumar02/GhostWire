@@ -28,6 +28,7 @@ import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
 /**
  * DIAG tab: inspect and drive the Qualcomm DIAG surface (/dev/diag) via root.
@@ -101,7 +102,7 @@ class DiagFragment : Fragment() {
             out.text = "Enter the new value as an even-length hex string (up to 128 bytes)."
             return
         }
-        AlertDialog.Builder(requireContext())
+        MaterialAlertDialogBuilder(requireContext())
             .setTitle("Write NV item $i?")
             .setMessage("This writes directly to the modem's NV. A wrong value can break the " +
                 "radio/IMEI. Only on your own device, and note the current value first (Read).")

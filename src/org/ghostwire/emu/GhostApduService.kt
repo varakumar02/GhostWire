@@ -20,6 +20,7 @@
 package org.ghostwire.emu
 
 import android.nfc.cardemulation.HostApduService
+import android.nfc.cardemulation.PollingFrame
 import android.os.Bundle
 
 /**
@@ -37,6 +38,9 @@ class GhostApduService : HostApduService() {
         val session = CardEmulator.session() ?: return notArmed
         return session.process(apdu)
     }
+
+    /** Observe-mode frames (see [Sniffer]); also delivered while emulating. */
+    override fun processPollingFrames(frames: List<PollingFrame>) = Sniffer.deliver(frames)
 
     override fun onDeactivated(reason: Int) {
         // Field lost or a different AID selected: reset the file-selection state

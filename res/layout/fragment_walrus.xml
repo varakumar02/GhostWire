@@ -45,6 +45,14 @@
             android:contentDescription="Import cards file" />
 
         <Button
+            android:id="@+id/card_sniff"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:text="Sniff" />
+
+        <Button
             android:id="@+id/card_limits"
             style="?attr/materialButtonOutlinedStyle"
             android:layout_width="wrap_content"

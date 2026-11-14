@@ -43,6 +43,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.switchmaterial.SwitchMaterial
 import org.ghostwire.emu.CardEmulator
+import org.ghostwire.emu.Sniffer
 import java.util.UUID
 
 /**
@@ -92,6 +93,7 @@ class WalrusFragment : Fragment() {
             importPicker.launch(arrayOf("*/*"))
         }
         view.findViewById<Button>(R.id.card_limits).setOnClickListener { showLimits() }
+        view.findViewById<Button>(R.id.card_sniff).setOnClickListener { startSniff() }
         view.findViewById<SwitchMaterial>(R.id.auto_scan).also { sw ->
             sw.isChecked = autoScan()
             sw.setOnCheckedChangeListener { _, on ->
@@ -121,6 +123,7 @@ class WalrusFragment : Fragment() {
         // "other"-category HCE only answers in the foreground anyway; disarm so
         // a backgrounded app never holds a card armed and the status is honest.
         CardEmulator.disarm()
+        nfc?.let { Sniffer.stop(requireActivity(), it) }
     }
 
     private fun updateStatus() {
@@ -271,6 +274,44 @@ class WalrusFragment : Fragment() {
             .setCancelable(false)
             .setPositiveButton("Stop") { _, _ ->
                 CardEmulator.disarm()
+                updateStatus()
+            }
+            .show()
+    }
+
+    /** Observe mode: list the polling frames nearby readers send until Stop. */
+    private fun startSniff() {
+        val a = nfc ?: return updateStatus()
+        stopCapture()
+        CardEmulator.disarm()
+        val log = TextView(requireContext()).apply {
+            setTextIsSelectable(true)
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(48, 24, 48, 24)
+            text = "Listening — hold the phone near a reader…\n"
+        }
+        val lines = ArrayDeque<String>()
+        val err = Sniffer.start(requireActivity(), a) { line ->
+            activity?.runOnUiThread {
+                lines.addFirst(line)
+                while (lines.size > 200) lines.removeLast()
+                log.text = lines.joinToString("\n")
+            }
+        }
+        if (err != null) {
+            AlertDialog.Builder(requireContext())
+                .setTitle("Sniff unavailable")
+                .setMessage("Observe mode can't start: $err.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle("Sniffing (observe mode)")
+            .setView(android.widget.ScrollView(requireContext()).apply { addView(log) })
+            .setCancelable(false)
+            .setPositiveButton("Stop") { _, _ ->
+                Sniffer.stop(requireActivity(), a)
                 updateStatus()
             }
             .show()

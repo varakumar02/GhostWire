@@ -102,8 +102,17 @@ class MainActivity : AppCompatActivity() {
         setBrandName()
         toolbar.inflateMenu(R.menu.main_menu)
         toolbar.setOnMenuItemClickListener {
-            if (it.itemId == R.id.action_accent) { showAccentDialog(); true } else false
+            when (it.itemId) {
+                R.id.action_accent -> { showAccentDialog(); true }
+                R.id.action_sound -> {
+                    AppPrefs.setMuted(this, !AppPrefs.muted(this))
+                    showSoundState()
+                    true
+                }
+                else -> false
+            }
         }
+        showSoundState()
         AutoScanService.syncNfcEntry(this)   // align the NFC entry with the saved toggle
 
         findViewById<BottomNavigationView>(R.id.bottom_nav).setOnItemSelectedListener { item ->
@@ -112,6 +121,15 @@ class MainActivity : AppCompatActivity() {
         // Selecting the item fires the listener, which calls showDomain().
         findViewById<BottomNavigationView>(R.id.bottom_nav).selectedItemId = R.id.domain_cellular
         handleTagIntent(intent)
+    }
+
+    /** Sound icon: full opacity = NFC sounds on, dimmed = muted. */
+    private fun showSoundState() {
+        val muted = AppPrefs.muted(this)
+        toolbar.menu.findItem(R.id.action_sound)?.apply {
+            icon?.mutate()?.alpha = if (muted) 80 else 255
+            title = if (muted) "NFC sound off" else "NFC sound on"
+        }
     }
 
     /** "Ghost Wire" wordmark: "Ghost" in text colour, "Wire" in the current accent. */

@@ -152,7 +152,8 @@ class WalrusFragment : Fragment() {
         a.enableReaderMode(
             requireActivity(), { tag -> onTag(tag) },
             NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
-                NfcAdapter.FLAG_READER_NFC_V or NfcAdapter.FLAG_READER_NFC_F,
+                NfcAdapter.FLAG_READER_NFC_V or NfcAdapter.FLAG_READER_NFC_F or
+                (if (AppPrefs.muted(requireContext())) NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS else 0),
             null,
         )
     }

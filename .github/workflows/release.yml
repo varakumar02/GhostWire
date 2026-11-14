@@ -1,0 +1,98 @@
+name: Build GhostWire APK
+
+on:
+  push:
+    branches: [aox]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ghostwire-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + tags, for release notes
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Build release APK
+        run: gradle --no-daemon assembleRelease
+
+      - name: Sign APK
+        id: sign
+        env:
+          PLATFORM_PK8_B64: ${{ secrets.PLATFORM_PK8_B64 }}
+          PLATFORM_X509: ${{ secrets.PLATFORM_X509 }}
+        run: |
+          set -e
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(find build/outputs/apk/release -name '*-release-unsigned.apk' | head -1)
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" aligned.apk
+          if [ -n "$PLATFORM_PK8_B64" ] && [ -n "$PLATFORM_X509" ]; then
+            # Optional: platform-signed APK (set the two repo secrets). This makes
+            # the privileged features (SIM/DIAG) work on an AxionOS build.
+            echo "$PLATFORM_PK8_B64" | base64 -d > platform.pk8
+            printf '%s' "$PLATFORM_X509" > platform.x509.pem
+            "$BT/apksigner" sign --key platform.pk8 --cert platform.x509.pem --out GhostWire.apk aligned.apk
+            echo "signed=platform" >> "$GITHUB_OUTPUT"
+            rm -f platform.pk8 platform.x509.pem
+          else
+            # Default: debug keystore, so the APK installs for testing. Features
+            # that need the platform signature (privileged permissions) are
+            # limited until it is flashed in the ROM or re-signed with the key.
+            keytool -genkeypair -keystore debug.jks -storepass android -keypass android \
+              -alias gw -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=GhostWire CI, O=GhostWire, C=US"
+            "$BT/apksigner" sign --ks debug.jks --ks-pass pass:android --key-pass pass:android \
+              --out GhostWire.apk aligned.apk
+            echo "signed=debug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Release notes from commits
+        id: notes
+        run: |
+          set -e
+          PREV=$(git tag --list 'ghostwire-*' --sort=-creatordate | head -1)
+          {
+            echo "### GhostWire APK"
+            if [ "${{ steps.sign.outputs.signed }}" = "platform" ]; then
+              echo "_Platform-signed — privileged features work on an AxionOS build._"
+            else
+              echo "_Debug-signed — installs for testing; privileged (SIM/DIAG) features need the platform signature._"
+            fi
+            echo
+            echo "### Changes"
+            if [ -n "$PREV" ]; then
+              git log --no-merges --pretty='- %s' "$PREV"..HEAD
+            else
+              git log --no-merges -30 --pretty='- %s'
+            fi
+          } > notes.md
+          echo "tag=ghostwire-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.notes.outputs.tag }}
+          name: GhostWire ${{ steps.notes.outputs.tag }}
+          body_path: notes.md
+          files: GhostWire.apk

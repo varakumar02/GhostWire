@@ -1,0 +1,6 @@
+# Gradle / Android Studio (the standalone CI build — Soong output lives elsewhere)
+.gradle/
+build/
+local.properties
+*.iml
+.idea/

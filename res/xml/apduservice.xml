@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Host card emulation: GhostApduService answers for the NFC Forum NDEF
+     Type-4 application AID, so a reader selecting it gets the armed card's
+     NDEF message. Category "other" (not payment); unlock not required so a
+     saved tag can be presented from the open app with the screen on. -->
+<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/emu_service_desc"
+    android:requireDeviceUnlock="false">
+    <aid-group
+        android:category="other"
+        android:description="@string/emu_aid_group_desc">
+        <aid-filter android:name="D2760000850101" />
+    </aid-group>
+</host-apdu-service>

@@ -42,6 +42,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.switchmaterial.SwitchMaterial
+import org.ghostwire.emu.CardEmulator
 import java.util.UUID
 
 /**
@@ -117,12 +118,16 @@ class WalrusFragment : Fragment() {
     override fun onPause() {
         super.onPause()
         stopCapture()
+        // "other"-category HCE only answers in the foreground anyway; disarm so
+        // a backgrounded app never holds a card armed and the status is honest.
+        CardEmulator.disarm()
     }
 
     private fun updateStatus() {
         status.text = when {
             nfc == null -> "NFC not available on this device"
             nfc?.isEnabled == false -> "NFC is off — enable it in system settings"
+            CardEmulator.isArmed() -> "Emulating \"${CardEmulator.armedName}\" — hold the phone to a reader"
             writeTarget != null -> "Hold a blank/writable tag to the phone to write \"${writeTarget?.name}\"…"
             capturing -> "Tap a card to the phone…"
             else -> "${cards.size} card(s) saved"
@@ -229,6 +234,48 @@ class WalrusFragment : Fragment() {
         status.text = "imported $added new card(s)"
     }
 
+    /** Arms a saved card for host emulation (HCE). Only cards carrying an NDEF
+     *  payload can be served as a Type-4 tag; anything else gets an honest
+     *  explanation instead of a tag that would not match. */
+    private fun startEmulate(card: Card) {
+        if (nfc == null) {
+            AlertDialog.Builder(requireContext())
+                .setTitle("Emulate")
+                .setMessage("This device has no NFC.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        // Reading and emulating can't run at once; drop reader mode first.
+        stopCapture()
+        val plan = CardEmulator.arm(card)
+        if (plan.mode != CardEmulator.Mode.NDEF) {
+            AlertDialog.Builder(requireContext())
+                .setTitle("Can't emulate this card")
+                .setMessage(plan.reason)
+                .setPositiveButton("OK", null)
+                .show()
+            updateStatus()
+            return
+        }
+        updateStatus()
+        AlertDialog.Builder(requireContext())
+            .setTitle("Emulating \"${card.name}\"")
+            .setMessage(
+                "${plan.reason}.\n\n" +
+                "Hold the phone flat against the reader. Emulation works while " +
+                "GhostWire is open and the screen is on; a reader that checks the " +
+                "card's UID or does MIFARE Classic auth won't be fooled — only the " +
+                "NDEF content is replayed.",
+            )
+            .setCancelable(false)
+            .setPositiveButton("Stop") { _, _ ->
+                CardEmulator.disarm()
+                updateStatus()
+            }
+            .show()
+    }
+
     private fun showLimits() {
         val msg = """
             Phone NFC is 13.56 MHz only. Hard limits:
@@ -239,7 +286,7 @@ class WalrusFragment : Fragment() {
 
             • MIFARE Classic key cracking — nested / darkside / hardnested: NOT possible via Android NFC. The API never exposes the nonces/parity those attacks need (auth happens inside the controller). On-device cracking = dictionary only; real nonce attacks need a Proxmark/libnfc reader. [universal to phones]
 
-            • MIFARE Classic emulation (HCE): not supported — needs a secure element. [device-specific]
+            • Emulation (HCE): only NDEF/Type-4 cards can be replayed host-side — the "Emulate" action serves a saved card's NDEF payload as a Type-4 tag. MIFARE Classic, a captured UID and a raw Type-2 dump can't be emulated (crypto1/UID live in the locked secure element); clone those to a tag instead. [device-specific]
 
             • FeliCa (NfcF) block read and full ISO-DEP/EMV depth: vary by device/region.
 
@@ -310,6 +357,10 @@ class WalrusFragment : Fragment() {
             adapter.notifyDataSetChanged()
             updateStatus()
             dialog.dismiss()
+        }
+        view.findViewById<ImageButton>(R.id.detail_emulate).setOnClickListener {
+            dialog.dismiss()
+            startEmulate(card)
         }
         view.findViewById<ImageButton>(R.id.detail_duplicate).setOnClickListener {
             cards.add(0, card.copy(

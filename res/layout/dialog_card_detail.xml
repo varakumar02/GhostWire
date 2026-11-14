@@ -28,6 +28,14 @@
             android:layout_weight="1" />
 
         <ImageButton
+            android:id="@+id/detail_emulate"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_emulate"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Emulate" />
+
+        <ImageButton
             android:id="@+id/detail_duplicate"
             android:layout_width="40dp"
             android:layout_height="40dp"

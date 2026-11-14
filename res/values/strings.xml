@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Ghost Wire</string>
+    <string name="emu_service_desc">GhostWire card emulation</string>
+    <string name="emu_aid_group_desc">Saved NDEF/Type-4 tag</string>
 </resources>

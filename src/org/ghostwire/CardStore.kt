@@ -27,6 +27,7 @@ import java.io.File
 class CardStore(private val ctx: Context) {
 
     private val file = File(ctx.filesDir, "cards.json")
+    private val binFile = File(ctx.filesDir, "cards_bin.json")
 
     fun load(): MutableList<Card> {
         if (!file.exists()) return mutableListOf()
@@ -40,6 +41,28 @@ class CardStore(private val ctx: Context) {
         val arr = JSONArray()
         cards.forEach { arr.put(it.toJson()) }
         file.writeText(arr.toString(2))
+    }
+
+    fun loadBin(): MutableList<Card> {
+        if (!binFile.exists()) return mutableListOf()
+        return runCatching {
+            val arr = JSONArray(binFile.readText())
+            MutableList(arr.length()) { Card.fromJson(arr.getJSONObject(it)) }
+        }.getOrDefault(mutableListOf())
+    }
+
+    fun saveBin(cards: List<Card>) {
+        val arr = JSONArray()
+        cards.forEach { arr.put(it.toJson()) }
+        binFile.writeText(arr.toString(2))
+    }
+
+    /** Move a deleted card into the recycle bin (newest first). */
+    fun trash(card: Card) {
+        val bin = loadBin()
+        bin.removeAll { it.id == card.id }
+        bin.add(0, card)
+        saveBin(bin)
     }
 
     /** Write all cards to a timestamped file in external files dir; return it. */

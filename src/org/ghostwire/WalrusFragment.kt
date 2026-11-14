@@ -96,6 +96,7 @@ class WalrusFragment : Fragment() {
         }
         view.findViewById<Button>(R.id.card_limits).setOnClickListener { showLimits() }
         view.findViewById<Button>(R.id.card_sniff).setOnClickListener { startSniff() }
+        view.findViewById<Button>(R.id.card_bin).setOnClickListener { showBin() }
         view.findViewById<SwitchMaterial>(R.id.auto_scan).also { sw ->
             sw.isChecked = autoScan()
             sw.setOnCheckedChangeListener { _, on ->
@@ -419,6 +420,7 @@ class WalrusFragment : Fragment() {
         view.findViewById<ImageButton>(R.id.detail_delete).setOnClickListener {
             cards.remove(card)
             store.save(cards)
+            store.trash(card)        // keep it in the recycle bin
             adapter.notifyDataSetChanged()
             updateStatus()
             dialog.dismiss()
@@ -436,6 +438,79 @@ class WalrusFragment : Fragment() {
         }
         dialog.show()
     }
+
+    /** Recycle bin: a card list of everything you deleted, each row with a
+     *  restore and a permanent-delete action, plus an Empty-bin button. */
+    private fun showBin() {
+        val view = LayoutInflater.from(requireContext()).inflate(R.layout.dialog_bin, null)
+        val list = view.findViewById<android.widget.LinearLayout>(R.id.bin_list)
+        val empty = view.findViewById<TextView>(R.id.bin_empty)
+        val subtitle = view.findViewById<TextView>(R.id.bin_subtitle)
+
+        val dialog = MaterialAlertDialogBuilder(requireContext())
+            .setView(view)
+            .setNeutralButton("Empty bin", null) // handled below so it doesn't dismiss
+            .setPositiveButton("Close", null)
+            .create()
+
+        fun render() {
+            val bin = store.loadBin()
+            subtitle.text =
+                if (bin.isEmpty()) "Deleted cards are kept here until you remove them."
+                else "${bin.size} card(s) in the bin — restore or delete them."
+            empty.visibility = if (bin.isEmpty()) View.VISIBLE else View.GONE
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.isEnabled = bin.isNotEmpty()
+            list.removeAllViews()
+            bin.forEach { card ->
+                val row = LayoutInflater.from(requireContext()).inflate(R.layout.item_bin, list, false)
+                row.findViewById<TextView>(R.id.bin_name).text = card.name
+                row.findViewById<TextView>(R.id.bin_type).text = card.typeLabel
+                row.findViewById<ImageButton>(R.id.bin_restore).setOnClickListener {
+                    removeFromBin(card)
+                    if (cards.none { it.id == card.id }) {
+                        cards.add(0, card)
+                        store.save(cards)
+                        adapter.notifyDataSetChanged()
+                    }
+                    status.text = "restored \"${card.name}\""
+                    render()
+                }
+                row.findViewById<ImageButton>(R.id.bin_delete).setOnClickListener {
+                    removeFromBin(card)
+                    status.text = "deleted \"${card.name}\" permanently"
+                    render()
+                }
+                list.addView(row)
+            }
+            updateStatus()
+        }
+
+        dialog.setOnShowListener {
+            render()
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                val n = store.loadBin().size
+                if (n == 0) return@setOnClickListener
+                MaterialAlertDialogBuilder(requireContext())
+                    .setTitle("Empty bin?")
+                    .setMessage("Permanently delete all $n card(s) in the bin?")
+                    .setPositiveButton("Delete all") { _, _ ->
+                        store.saveBin(emptyList())
+                        status.text = "bin emptied"
+                        render()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun removeFromBin(card: Card) {
+        val bin = store.loadBin()
+        bin.removeAll { it.id == card.id }
+        store.saveBin(bin)
+    }
+
 }
 
 /** Walrus-style card list: name header, logo, human-readable info band, and a

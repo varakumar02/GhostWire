@@ -70,7 +70,7 @@ Most screens work from a normal install; the ones below need more.
 the AxionOS OP9 manifest at `packages/apps/GhostWire` and installed as a
 platform-signed privileged system app. No manual steps.
 
-**Standalone APK.** Every push to `aox` builds a debug-signed APK and attaches
+**Standalone APK.** Every push to `main` builds a debug-signed APK and attaches
 it to a GitHub [Release](../../releases), with the commit messages since the
 last release as the notes. To get a *platform-signed* APK from CI (so the
 privileged features work on an AxionOS device), add two repo secrets —

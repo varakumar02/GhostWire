@@ -48,15 +48,24 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Auto-scan: let the OS dispatch tapped tags here, even when
-                 GhostWire is closed. Capture only happens when auto-scan is on. -->
+        </activity>
+
+        <!-- Auto-scan entry: lets the OS dispatch tapped tags to GhostWire even
+             when it is closed. Disabled by default and switched on/off with the
+             auto-scan toggle (AutoScanService.setEnabled), so with auto-scan off
+             a tapped card no longer opens the app. -->
+        <activity-alias
+            android:name=".NfcAutoScan"
+            android:targetActivity=".MainActivity"
+            android:enabled="false"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.nfc.action.TECH_DISCOVERED" />
             </intent-filter>
             <meta-data
                 android:name="android.nfc.action.TECH_DISCOVERED"
                 android:resource="@xml/nfc_tech_filter" />
-        </activity>
+        </activity-alias>
 
         <service
             android:name=".AutoScanService"

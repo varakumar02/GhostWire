@@ -104,6 +104,7 @@ class MainActivity : AppCompatActivity() {
         toolbar.setOnMenuItemClickListener {
             if (it.itemId == R.id.action_accent) { showAccentDialog(); true } else false
         }
+        AutoScanService.syncNfcEntry(this)   // align the NFC entry with the saved toggle
 
         findViewById<BottomNavigationView>(R.id.bottom_nav).setOnItemSelectedListener { item ->
             domainFor(item.itemId)?.let { showDomain(it); true } ?: false

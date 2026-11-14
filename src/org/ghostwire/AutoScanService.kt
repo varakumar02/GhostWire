@@ -24,7 +24,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Context
+import android.content.pm.PackageManager
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
@@ -91,8 +93,19 @@ class AutoScanService : Service() {
 
         fun isEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY, false)
 
-        private fun setEnabled(ctx: Context, on: Boolean) =
+        private fun setEnabled(ctx: Context, on: Boolean) {
             prefs(ctx).edit().putBoolean(KEY, on).apply()
+            syncNfcEntry(ctx)
+        }
+
+        /** The TECH_DISCOVERED alias is live only while auto-scan is on. */
+        fun syncNfcEntry(ctx: Context) {
+            val state = if (isEnabled(ctx)) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+            else PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+            ctx.packageManager.setComponentEnabledSetting(
+                ComponentName(ctx, "org.ghostwire.NfcAutoScan"), state, PackageManager.DONT_KILL_APP,
+            )
+        }
 
         fun start(ctx: Context) {
             setEnabled(ctx, true)

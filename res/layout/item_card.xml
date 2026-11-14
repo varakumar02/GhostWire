@@ -57,6 +57,14 @@
         </LinearLayout>
 
         <ImageButton
+            android:id="@+id/card_emulate"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:src="@drawable/ic_emulate"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Emulate" />
+
+        <ImageButton
             android:id="@+id/card_write"
             android:layout_width="44dp"
             android:layout_height="44dp"

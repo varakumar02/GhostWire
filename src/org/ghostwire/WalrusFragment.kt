@@ -82,7 +82,8 @@ class WalrusFragment : Fragment() {
         nfc = NfcAdapter.getDefaultAdapter(requireContext())
         status = view.findViewById(R.id.walrus_status)
 
-        adapter = CardAdapter(cards, onClick = { showDetail(it) }, onWrite = { startWrite(it) })
+        adapter = CardAdapter(cards, onClick = { showDetail(it) }, onWrite = { startWrite(it) },
+            onEmulate = { startEmulate(it) })
         view.findViewById<RecyclerView>(R.id.card_list).also {
             it.layoutManager = LinearLayoutManager(requireContext())
             it.adapter = adapter
@@ -399,10 +400,6 @@ class WalrusFragment : Fragment() {
             updateStatus()
             dialog.dismiss()
         }
-        view.findViewById<ImageButton>(R.id.detail_emulate).setOnClickListener {
-            dialog.dismiss()
-            startEmulate(card)
-        }
         view.findViewById<ImageButton>(R.id.detail_duplicate).setOnClickListener {
             cards.add(0, card.copy(
                 id = UUID.randomUUID().toString(),
@@ -424,6 +421,7 @@ class CardAdapter(
     private val items: List<Card>,
     private val onClick: (Card) -> Unit,
     private val onWrite: (Card) -> Unit,
+    private val onEmulate: (Card) -> Unit,
 ) : RecyclerView.Adapter<CardAdapter.VH>() {
 
     class VH(v: View) : RecyclerView.ViewHolder(v) {
@@ -431,6 +429,7 @@ class CardAdapter(
         val type: TextView = v.findViewById(R.id.card_type)
         val info: TextView = v.findViewById(R.id.card_info)
         val write: View = v.findViewById(R.id.card_write)
+        val emulate: View = v.findViewById(R.id.card_emulate)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH =
@@ -445,5 +444,6 @@ class CardAdapter(
         h.info.text = "UID ${c.uid}"
         h.itemView.setOnClickListener { onClick(c) }
         h.write.setOnClickListener { onWrite(c) }
+        h.emulate.setOnClickListener { onEmulate(c) }
     }
 }

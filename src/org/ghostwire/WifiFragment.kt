@@ -32,8 +32,10 @@ import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import java.util.concurrent.atomic.AtomicBoolean
 import androidx.fragment.app.Fragment
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
@@ -91,7 +93,7 @@ class WifiFragment : Fragment() {
     private fun refreshIfaces() {
         status.text = "Enumerating interfaces…"
         Thread {
-            val found = WifiIface.list()
+            val found = WifiIface.list(tools)
             if (!isAdded) return@Thread
             ifaces = found
             ifaceSpinner.post {
@@ -119,7 +121,7 @@ class WifiFragment : Fragment() {
         if (mon != null) {
             status.text = "Disabling monitor on $mon…"
             Thread {
-                val r = WifiIface.disableMonitor(mon)
+                val r = WifiIface.disableMonitor(tools, mon)
                 if (!isAdded) return@Thread
                 monitorIface = if (r.ok) null else mon
                 status.post {
@@ -145,12 +147,12 @@ class WifiFragment : Fragment() {
             .setPositiveButton("Enable") { _, _ ->
                 status.text = "Enabling monitor on ${iface.name}…"
                 Thread {
-                    val r = WifiIface.enableMonitor(iface.name, iface.internal)
+                    val r = WifiIface.enableMonitor(tools, iface.name, iface.internal)
                     if (!isAdded) return@Thread
-                    monitorIface = if (r.ok) iface.name else null
+                    monitorIface = if (r.ok) r.monIface else null
                     status.post {
                         syncMonButton()
-                        status.text = (if (r.ok) "Monitor on (${iface.name}, mode=${r.mode})."
+                        status.text = (if (r.ok) "Monitor on (${r.monIface}, mode=${r.mode})."
                         else "Enable failed (mode=${r.mode}).") + "\n${r.log.trim()}"
                     }
                 }.start()
@@ -185,13 +187,22 @@ class WifiFragment : Fragment() {
     @SuppressLint("MissingPermission")
     private fun startPassive() {
         status.text = "Passive scan (WifiManager) — enable monitor for airodump capture."
-        Root.run("pm grant org.ghostwire android.permission.ACCESS_FINE_LOCATION 2>&1")
         val f = IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
         androidx.core.content.ContextCompat.registerReceiver(
             requireContext(), scanRx, f, androidx.core.content.ContextCompat.RECEIVER_EXPORTED
         )
-        passiveResults()
-        runCatching { @Suppress("DEPRECATION") wifiMgr?.startScan() }
+        // The location grant shells out to `su` — that first su call can block for seconds,
+        // so it must never run on the UI thread (it ANR'd the app). Grant off-thread, then
+        // kick the scan back on the main thread.
+        Thread {
+            Root.run("pm grant org.ghostwire android.permission.ACCESS_FINE_LOCATION 2>&1")
+            if (!isAdded) return@Thread
+            list.post {
+                if (!isAdded || !scanning) return@post
+                passiveResults()
+                runCatching { @Suppress("DEPRECATION") wifiMgr?.startScan() }
+            }
+        }.start()
     }
 
     private val scanRx = object : BroadcastReceiver() {
@@ -209,6 +220,7 @@ class WifiFragment : Fragment() {
             ap.essid = ssid?.takeIf { it.isNotBlank() }
             val sec = Wifi.security(r.capabilities)
             ap.enc = sec.enc; ap.auth = sec.auth; ap.pmf = sec.pmf; ap.wps = sec.wps
+            ap.protocols = Wifi.protocols(r.capabilities)
             ap.lastSeen = System.currentTimeMillis()
         }
         render()
@@ -231,14 +243,16 @@ class WifiFragment : Fragment() {
                 return@Thread
             }
             val ad = Airodump(tools, iface).also { airodump = it }
-            ad.start()
+            // Poll first, then launch airodump in its own thread: the backgrounded
+            // launch call can block reading the detached process's stdout, and must
+            // not stall the poller that updates the table.
             poller = Thread {
                 while (!Thread.currentThread().isInterrupted && scanning) {
-                    val parsed = ad.poll()
-                    if (parsed != null) mergeAirodump(parsed)
+                    try { ad.poll()?.let { mergeAirodump(it) } } catch (_: Exception) {}
                     try { Thread.sleep(1000) } catch (_: InterruptedException) { break }
                 }
             }.also { it.start() }
+            Thread { ad.start() }.start()
         }.start()
     }
 
@@ -249,6 +263,7 @@ class WifiFragment : Fragment() {
             ap.power = na.power; ap.beacons = na.beacons; ap.ivs = na.ivs
             if (na.essid != null) ap.essid = na.essid
             ap.wps = ap.wps || na.wps
+            if (na.protocols.isNotBlank()) ap.protocols = na.protocols
             ap.lastSeen = System.currentTimeMillis()
         }
         for (st in p.stations) {
@@ -272,9 +287,14 @@ class WifiFragment : Fragment() {
     }
 
     private fun row(ap: Ap): View = TextView(requireContext()).apply {
-        setPadding(0, 10, 0, 10)
+        setPadding(dp(8), dp(10), dp(8), dp(10))
         typeface = android.graphics.Typeface.MONOSPACE
         textSize = 13f
+        // Real pressed/selected affordance.
+        val tv = android.util.TypedValue()
+        context.theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true)
+        setBackgroundResource(tv.resourceId)
+        isClickable = true; isLongClickable = true
         text = if (expanded.contains(ap.bssid)) detail(ap) else summary(ap)
         setOnClickListener {
             if (!expanded.add(ap.bssid)) expanded.remove(ap.bssid)
@@ -283,49 +303,115 @@ class WifiFragment : Fragment() {
         setOnLongClickListener { actions(ap); true }
     }
 
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** Two-line summary: signal/channel/protocols, then SSID + client count. */
     private fun summary(ap: Ap): String {
-        val wps = if (ap.wps) " WPS" else ""
-        val cli = if (ap.clients.isNotEmpty()) " ·${ap.clients.size}cli" else ""
-        return "%s  CH%-3d %-7s  %-20s%s%s ▸".format(
-            Wifi.powerBar(ap.power), ap.channel, ap.encLabel(),
-            ap.name().take(20), wps, cli
+        val cli = if (ap.clients.isNotEmpty()) "  ·${ap.clients.size} client${if (ap.clients.size == 1) "" else "s"}" else ""
+        return "%s  CH%-3d %s\n  %s%s ▸".format(
+            Wifi.powerBar(ap.power), ap.channel, ap.protoLabel(),
+            ap.name(), cli
         )
     }
 
     private fun detail(ap: Ap): String = buildString {
         appendLine("${ap.name()}  ▾")
-        appendLine("  bssid   : ${ap.bssid}")
-        appendLine("  channel : ${ap.channel}    power: ${ap.power} dBm")
-        appendLine("  enc     : ${ap.encLabel()}   beacons: ${ap.beacons}   ivs: ${ap.ivs}")
-        if (ap.wps) appendLine("  wps     : yes")
+        appendLine("  bssid     : ${ap.bssid}")
+        appendLine("  channel   : ${ap.channel}    power: ${ap.power} dBm")
+        appendLine("  protocols : ${ap.protoLabel()}")
+        appendLine("  beacons   : ${ap.beacons}   ivs: ${ap.ivs}")
         if (ap.clients.isNotEmpty()) {
-            appendLine("  clients :")
+            appendLine("  clients   : ${ap.clients.size}")
             ap.clients.values.sortedByDescending { it.power }.forEach {
                 appendLine("     ${it.mac}  ${it.power} dBm  ${it.packets} pkts")
             }
+        } else if (monitorIface == null) {
+            appendLine("  clients   : (enable monitor to see connected stations)")
         }
-        append("  (long-press for actions)")
+        append("  (long-press for attacks)")
     }
 
-    /** Long-press actions on an AP — gated active operations. */
+    /** Long-press actions on an AP — the full wifite2-style WPA + WPS set, gated. */
     private fun actions(ap: Ap) {
         val mon = monitorIface
         if (mon == null) {
-            status.text = "Enable monitor mode first for capture/deauth."
+            status.text = "Enable monitor mode first for capture/attacks."
             return
         }
-        val items = arrayOf("Capture WPA handshake (deauth + wait)", "Deauth (burst)")
+        val items = arrayOf(
+            "Capture WPA handshake (deauth + wait)",
+            "Crack captured handshake (wordlist)",
+            "PMKID capture (clientless)",
+            "WPS pixie-dust",
+            "WPS PIN brute",
+            "WPS null-pin",
+            "Deauth (burst)",
+        )
         MaterialAlertDialogBuilder(requireContext())
             .setTitle(ap.name())
             .setItems(items) { _, which ->
                 confirmActive(ap) {
                     when (which) {
                         0 -> captureHandshake(mon, ap)
-                        1 -> deauth(mon, ap)
+                        1 -> crack(ap)
+                        2 -> pmkid(mon, ap)
+                        3 -> wps(mon, ap, pixie = true)
+                        4 -> wps(mon, ap, pixie = false)
+                        5 -> wpsNull(mon, ap)
+                        6 -> deauth(mon, ap)
                     }
                 }
             }
             .show()
+    }
+
+    /**
+     * Run [attack] on a background thread and stream its output inline in the AP list card —
+     * the list is replaced with a live terminal view that tails the tool's log file ([outName]
+     * in the capture dir) every ~500 ms until it finishes, then appends the verdict. Tap Scan
+     * to return to the AP list. This replaces the old truncated single-line status output.
+     */
+    private fun runWithOutput(title: String, outName: String, attack: (String) -> String) {
+        if (scanning) stop()
+        val header = TextView(requireContext()).apply {
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            textSize = 14f
+            setPadding(dp(8), dp(10), dp(8), dp(6))
+            text = "▌ $title"
+        }
+        val outView = TextView(requireContext()).apply {
+            typeface = android.graphics.Typeface.MONOSPACE
+            textSize = 12f
+            setPadding(dp(8), 0, dp(8), dp(12))
+            setTextIsSelectable(true)
+            text = "running…"
+        }
+        list.removeAllViews(); list.addView(header); list.addView(outView)
+        status.text = "$title — running… (tap Scan to return to the AP list)"
+        val scroll = list.parent as? ScrollView
+        val outAbs = tools.workFile(outName)
+        Root.run("rm -f '$outAbs' 2>/dev/null")
+        val running = AtomicBoolean(true)
+        Thread {
+            while (running.get() && isAdded) {
+                val txt = tools.readFile(outAbs)
+                if (txt.isNotBlank()) outView.post {
+                    if (isAdded) { outView.text = txt; scroll?.post { scroll.fullScroll(View.FOCUS_DOWN) } }
+                }
+                try { Thread.sleep(500) } catch (_: InterruptedException) { break }
+            }
+        }.start()
+        Thread {
+            val verdict = runCatching { attack(outAbs) }.getOrElse { "error: ${it.message}" }
+            running.set(false)
+            if (!isAdded) return@Thread
+            outView.post {
+                val cur = tools.readFile(outAbs)
+                outView.text = (cur + "\n\n── result ──\n" + verdict).trim()
+                status.text = "$title — done. (tap Scan to return to the AP list)"
+                scroll?.post { scroll.fullScroll(View.FOCUS_DOWN) }
+            }
+        }.start()
     }
 
     private fun confirmActive(ap: Ap, go: () -> Unit) {
@@ -338,13 +424,32 @@ class WifiFragment : Fragment() {
             .show()
     }
 
-    private fun deauth(iface: String, ap: Ap) {
-        status.text = "Deauthing ${ap.name()}…"
-        Thread {
-            val out = tools.deauth(iface, ap.bssid, null)
-            if (isAdded) status.post { status.text = "Deauth sent to ${ap.bssid}\n${out.trim()}" }
-        }.start()
-    }
+    private fun deauth(iface: String, ap: Ap) =
+        runWithOutput("Deauth — ${ap.name()}", "deauth.log") { out ->
+            tools.deauth(iface, ap.bssid, ap.clients.keys.firstOrNull(), bursts = 10, out = out)
+            "Deauth burst sent to ${ap.bssid}."
+        }
+
+    private fun pmkid(iface: String, ap: Ap) =
+        runWithOutput("PMKID — ${ap.name()}", "pmkid.log") { out ->
+            tools.pmkid(iface, ap.bssid, ap.channel, out = out)
+        }
+
+    private fun wps(iface: String, ap: Ap, pixie: Boolean) =
+        runWithOutput(
+            (if (pixie) "WPS pixie-dust" else "WPS PIN brute") + " — ${ap.name()}", "wps.log"
+        ) { out -> tools.wps(iface, ap.bssid, ap.channel, pixie = pixie, out = out) }
+
+    private fun wpsNull(iface: String, ap: Ap) =
+        runWithOutput("WPS null-pin — ${ap.name()}", "wpsnull.log") { out ->
+            tools.wpsNull(iface, ap.bssid, ap.channel, out = out)
+        }
+
+    private fun crack(ap: Ap) =
+        runWithOutput("Crack handshake — ${ap.name()}", "crack.log") { out ->
+            val cap = tools.newest("hs-*.cap").ifBlank { tools.newest("gw-*.cap") }
+            tools.crack(cap, ap.bssid, tools.wordlist, out)
+        }
 
     private fun captureHandshake(iface: String, ap: Ap) {
         status.text = "Capturing handshake for ${ap.name()} (up to 60 s)…"
@@ -366,8 +471,8 @@ class WifiFragment : Fragment() {
                 status.text = when (got) {
                     true -> "Handshake captured ✓\n$cap"
                     false -> "No handshake in 60 s. Retry when a client is connected."
-                    null -> "Capture saved ($cap) but no detector tool bundled " +
-                        "(tshark/hcxpcapngtool) to confirm the handshake."
+                    null -> "Capture saved ($cap) but hcxpcapngtool isn't bundled " +
+                        "to confirm the handshake."
                 }
             }
         }.start()

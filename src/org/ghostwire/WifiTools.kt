@@ -139,16 +139,20 @@ class WifiTools(context: Context) {
      * Offline crack of a captured handshake against a wordlist with aircrack-ng. Streams
      * progress to [out]; returns the recovered key or a not-found note.
      */
-    fun crack(capPath: String, bssid: String, wordlist: String, out: String): String {
+    fun crack(capPath: String, bssid: String, wordlist: String, out: String, label: String = ""): String {
         if (capPath.isBlank()) return "no capture file — grab a handshake first."
-        if (!bssid.matches(MAC)) return "invalid bssid"
         if (!File(wordlist).exists()) return "wordlist missing: $wordlist"
-        runAttack("${path("aircrack-ng")} -w '$wordlist' -b $bssid '$capPath'", out)
+        // bssid optional: with one, aircrack targets that AP; without, it tries every network
+        // in the capture.
+        val b = bssid.takeIf { it.matches(MAC) }?.let { "-b $it" } ?: ""
+        runAttack("${path("aircrack-ng")} -w '$wordlist' $b '$capPath'", out)
         // Root.run returns "(no output)" when a command prints nothing, so test for the
         // actual marker rather than blankness.
         val key = Root.run("grep -a 'KEY FOUND' '$out' 2>/dev/null | head -n1").out.trim()
-        return if ("KEY FOUND" in key) key
-        else "Key not found in wordlist. Capture clean? Try a bigger list."
+        return if ("KEY FOUND" in key) {
+            recordCracked("${label.ifBlank { bssid }}  $key  [${capPath.substringAfterLast('/')}]")
+            key
+        } else "Key not found in wordlist. Capture clean? Try a bigger list."
     }
 
     /**
@@ -223,6 +227,45 @@ class WifiTools(context: Context) {
             .filter { Regex("WPS PIN|WPA PSK|pixie|locked|rate limit|not found|empty pin", RegexOption.IGNORE_CASE).containsMatchIn(it) }
             .toList().takeLast(20).joinToString("\n")
             .ifBlank { "reaver ran up to ${secs}s, no PIN/PSK recovered." }
+
+    // ---- library: handshakes, cracked keys, wordlists, cleanup ----------------
+
+    private val wordlistDir = File(base, "wordlists").apply { mkdirs() }
+    private val crackedFile = File(base, "cracked.txt").absolutePath
+
+    /** Append a cracked-key record (one line: "ssid/bssid  KEY FOUND…  [cap]"). */
+    fun recordCracked(line: String) =
+        Root.run("printf '%s\\n' ${shellQuote(line)} >> '$crackedFile' 2>/dev/null").let {}
+
+    /** All recorded cracked results, newest last, or "" when none. */
+    fun crackedList(): String = readFile(crackedFile).let { if (it == "(no output)") "" else it }
+
+    /** Deliberate handshake capture files (hs-*.cap), newest first. */
+    fun handshakes(): List<String> =
+        Root.run("ls -1t $workDir/hs-*.cap 2>/dev/null").out.lineSequence()
+            .map { it.trim() }.filter { it.endsWith(".cap") }.toList()
+
+    /** Bundled wordlist plus any the user imported. */
+    fun wordlists(): List<String> =
+        listOf(wordlist) + (wordlistDir.listFiles()?.sorted()?.map { it.absolutePath } ?: emptyList())
+
+    /** Save imported wordlist bytes under a sanitised [name]; returns its path. */
+    fun importWordlist(name: String, bytes: ByteArray): String {
+        val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "list.txt" }
+        val f = File(wordlistDir, safe)
+        f.writeBytes(bytes)
+        return f.absolutePath
+    }
+
+    /** Kill stray tools and delete transient leftovers (scan CSVs, temp caps, logs); keeps
+     *  handshakes, cracked.txt and wordlists. */
+    fun cleanLeftovers(): String {
+        Root.run("pkill -9 -f airodump-ng 2>/dev/null; pkill -9 -f aireplay-ng 2>/dev/null; " +
+            "pkill -9 -f reaver 2>/dev/null; pkill -9 -f hcxdumptool 2>/dev/null")
+        Root.run("cd $workDir && rm -f gw-*.* pm-*.* *.csv *.kismet* *.log *.netxml hs-*.csv 2>/dev/null")
+        return "Killed stray capture/attack tools and removed scan/temp files. " +
+            "Handshakes, cracked results and wordlists kept."
+    }
 
     companion object {
         private val MAC = Regex("^[0-9A-Fa-f:]{17}$")

@@ -29,7 +29,30 @@ kimocoder's cross-compile build system:
   binaries land in out/aarch64-linux-android/<tool>/bin/
 
 Versions: aircrack-ng 1.7, iw 6.17, reaver 1.6.6 (t6x), hcxdumptool 7.0.1,
-hcxtools 7.0.1, pixiewps 1.4.2.
+hcxtools 7.0.1, pixiewps 1.4.2, wash 1.6.6 (t6x), bully 1.4-00.
+
+wash is the SAME binary as reaver (t6x builds wash as a symlink to reaver;
+main.c dispatches on argv[0] basename), so it is shipped under the name "wash".
+kimocoder's build-reaver.sh only copies reaver out (cp reaver || cp wash), so
+wash is taken from the build tree and given the same TLS-alignment fix + strip.
+
+bully (github.com/aanarchyy/bully, 1.4-00) has no kimocoder recipe. Built with
+the same NDK (aarch64-linux-android21-clang) against the libpcap/libnl3 this
+image builds for reaver:
+  CC -O2 -fno-emulated-tls -D_GNU_SOURCE -I. -Iutils -Itls -Iwps -Icrypto \
+     -Icommon -DUSE_INTERNAL_CRYPTO -DCONFIG_NO_RANDOM_POOL \
+     -I<prefix>/libpcap/include -o bully bully.c -static \
+     -L<prefix>/libpcap/lib -L<prefix>/libnl3/lib -lpcap -lnl-genl-3 -lnl-3
+  then fix-tls-alignment.py bully 64; llvm-strip bully.
+One source fix: bully.h's global array `times[]` collides with bionic's
+times() at link ("duplicate symbol: times") — renamed `times[`->`pkt_times[`
+in bully.h, 80211.c, bully.c.
+
+NOTE (OP9 internal qcacld monitor): like reaver, wash and bully do not work
+usefully on the internal radio (con_mode monitor delivers frames with a bad-FCS
+radiotap flag that the reaver/bully 802.11 stack drops; wash fixed-channel mode
+errors pcap_activate -9). airodump-ng works there, these do not. Both are for
+an external OTG adapter (iw-based monitor); see WifiTools.
 
 Record the sha256 of each committed file here for reproducibility:
 
@@ -42,6 +65,8 @@ Record the sha256 of each committed file here for reproducibility:
   # packetforge-ng   742e3a698e7be381f7df05a92d01ee31275141a9e13d4bf2bf66750ae79effb6
   # pixiewps         4079214f6f915038647b553aafe153023900c5e5745a19618c52ca47eb1bbb00
   # reaver           e3353ebd3f359510fa614adcde6e2116da4c02ad6339ea295825b283c282c1bc
+  # wash             e3353ebd3f359510fa614adcde6e2116da4c02ad6339ea295825b283c282c1bc  (= reaver; t6x dispatches on argv[0])
+  # bully            4979e5cc5e5371180687524511c743ff44b1c0be73360f74e33aa76295516c2d
 
 GhostWire is GPLv3; these are separate GPLv2/GPLv3 upstream programs it merely
 executes, kept with their own notices. The app's own code reimplements wifite2's

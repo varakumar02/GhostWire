@@ -58,6 +58,15 @@
             android:text="Scan" />
     </LinearLayout>
 
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/wifi_library"
+        style="@style/GhostWire.Button.Ghost"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:text="Saved handshakes · passwords · wordlists" />
+
+
     <TextView
         android:id="@+id/wifi_status"
         android:layout_width="match_parent"

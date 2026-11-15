@@ -38,6 +38,7 @@ class Ap(val bssid: String) {
     var ivs: Long = 0
     var essid: String? = null   // null = hidden
     var wps: Boolean = false
+    var protocols: String = ""  // full flag set: "WPA2/WPA3 PSK WPS PMF~"
     var lastSeen: Long = 0
     val clients = LinkedHashMap<String, Station>()
 
@@ -47,6 +48,9 @@ class Ap(val bssid: String) {
         val p = when (pmf) { 2 -> "+"; 1 -> "~"; else -> "" }
         return (enc.ifBlank { "?" }) + a + p
     }
+
+    /** Full protocol flags for the row — the complete set, not just the primary enc. */
+    fun protoLabel(): String = protocols.ifBlank { encLabel() }
 
     fun name(): String = essid ?: "($bssid)"
 }
@@ -108,6 +112,53 @@ object Wifi {
     }
 
     data class Quad(val enc: String, val auth: String, val pmf: Int, val wps: Boolean)
+
+    /**
+     * Full protocol flag set from a WifiManager capabilities string, e.g.
+     * "[WPA2-PSK-CCMP][RSN-SAE-CCMP][ESS][WPS][MFPC]" -> "WPA2/WPA3 PSK/SAE WPS PMF~".
+     * Unlike [security], this keeps every key-mgmt family the AP advertises (a mixed
+     * WPA+WPA2 or WPA2+WPA3 AP shows both).
+     */
+    fun protocols(caps: String): String {
+        val c = caps.uppercase()
+        val families = ArrayList<String>()
+        if ("WPA3" in c || "SAE" in c) families += "WPA3"
+        if ("RSN" in c || "WPA2" in c) families += "WPA2"
+        if ("[WPA-" in c) families += "WPA"            // WPA1 tag, distinct from WPA2
+        if ("WEP" in c) families += "WEP"
+        if ("OWE" in c && families.isEmpty()) families += "OWE"
+        if (families.isEmpty()) families += "OPEN"
+        val auth = ArrayList<String>()
+        if ("SAE" in c) auth += "SAE"
+        if ("EAP" in c || "-MGT" in c) auth += "EAP"
+        if ("PSK" in c) auth += "PSK"
+        if ("OWE" in c) auth += "OWE"
+        val out = ArrayList<String>()
+        out += families.joinToString("/")
+        if (auth.isNotEmpty()) out += auth.joinToString("/")
+        if ("WPS" in c) out += "WPS"
+        when { "MFPR" in c -> out += "PMF+"; "MFPC" in c -> out += "PMF~" }
+        return out.joinToString(" ")
+    }
+
+    /** Full protocol flags from the airodump CSV privacy + auth columns (monitor path). */
+    fun protocolsFromCsv(privacy: String, auth: String, wps: Boolean): String {
+        val p = privacy.uppercase()
+        val families = ArrayList<String>()
+        if ("WPA3" in p) families += "WPA3"
+        if ("WPA2" in p) families += "WPA2"
+        if (Regex("(^|\\s)WPA($|\\s)").containsMatchIn(p)) families += "WPA"
+        if ("WEP" in p) families += "WEP"
+        if ("OWE" in p) families += "OWE"
+        if (families.isEmpty()) families += if (p.isBlank() || "OPN" in p) "OPEN" else p.trim()
+        val out = ArrayList<String>()
+        out += families.joinToString("/")
+        when (auth.uppercase()) {
+            "SAE" -> out += "SAE"; "PSK" -> out += "PSK"; "MGT" -> out += "EAP"; "OWE" -> out += "OWE"
+        }
+        if (wps) out += "WPS"
+        return out.joinToString(" ")
+    }
 
     /** Three-cell signal bar + value, from raw dBm, mirroring wifite's PWR column. */
     fun powerBar(dbm: Int): String {

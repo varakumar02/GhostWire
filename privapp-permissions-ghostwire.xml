@@ -7,5 +7,7 @@
         <permission name="android.permission.READ_PRIVILEGED_PHONE_STATE" />
         <!-- SDR tab: manage/enumerate USB-OTG devices. -->
         <permission name="android.permission.MANAGE_USB" />
+        <!-- Wi-Fi tab: full scan results + no scan throttling for a system app. -->
+        <permission name="android.permission.NETWORK_SETTINGS" />
     </privapp-permissions>
 </permissions>

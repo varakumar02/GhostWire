@@ -120,8 +120,10 @@ class WifiTools(context: Context) {
      */
     private fun runAttack(cmd: String, outAbs: String?): String {
         val env = "export LD_LIBRARY_PATH=${binDir.absolutePath}:\$LD_LIBRARY_PATH; "
+        // Append (not truncate) so a sequence can stream several sub-attacks into one log;
+        // single-attack callers clear the log once before starting.
         val body = if (outAbs != null)
-            "cd $workDir && $env: > '$outAbs'; $cmd >> '$outAbs' 2>&1; cat '$outAbs'"
+            "cd $workDir && $env$cmd >> '$outAbs' 2>&1; cat '$outAbs'"
         else "cd $workDir && $env$cmd 2>&1"
         return Root.run(body).out
     }
@@ -148,10 +150,12 @@ class WifiTools(context: Context) {
         runAttack("${path("aircrack-ng")} -w '$wordlist' $b '$capPath'", out)
         // Root.run returns "(no output)" when a command prints nothing, so test for the
         // actual marker rather than blankness.
-        val key = Root.run("grep -a 'KEY FOUND' '$out' 2>/dev/null | head -n1").out.trim()
-        return if ("KEY FOUND" in key) {
-            recordCracked("${label.ifBlank { bssid }}  $key  [${capPath.substringAfterLast('/')}]")
-            key
+        val keyLine = Root.run("grep -a 'KEY FOUND' '$out' 2>/dev/null | head -n1").out.trim()
+        return if ("KEY FOUND" in keyLine) {
+            // aircrack prints: KEY FOUND! [ the passphrase ]
+            val pass = Regex("""\[\s*(.*?)\s*]""").find(keyLine)?.groupValues?.get(1).orEmpty()
+            recordCracked(label.ifBlank { bssid }, bssid, pass, capPath.substringAfterLast('/'))
+            "KEY FOUND: $pass"
         } else "Key not found in wordlist. Capture clean? Try a bigger list."
     }
 
@@ -231,14 +235,33 @@ class WifiTools(context: Context) {
     // ---- library: handshakes, cracked keys, wordlists, cleanup ----------------
 
     private val wordlistDir = File(base, "wordlists").apply { mkdirs() }
-    private val crackedFile = File(base, "cracked.txt").absolutePath
+    private val crackedFile = File(base, "cracked.json")
 
-    /** Append a cracked-key record (one line: "ssid/bssid  KEY FOUND…  [cap]"). */
-    fun recordCracked(line: String) =
-        Root.run("printf '%s\\n' ${shellQuote(line)} >> '$crackedFile' 2>/dev/null").let {}
+    /** The cracked-results array ({ssid,bssid,key,cap,ts}); [] when none/unreadable. */
+    private fun crackedJson(): org.json.JSONArray =
+        runCatching { org.json.JSONArray(crackedFile.readText()) }.getOrDefault(org.json.JSONArray())
 
-    /** All recorded cracked results, newest last, or "" when none. */
-    fun crackedList(): String = readFile(crackedFile).let { if (it == "(no output)") "" else it }
+    /** Record a recovered key as a JSON entry (app-owned file, direct I/O). */
+    fun recordCracked(ssid: String, bssid: String, key: String, cap: String) {
+        val arr = crackedJson()
+        arr.put(org.json.JSONObject()
+            .put("ssid", ssid).put("bssid", bssid).put("key", key)
+            .put("cap", cap).put("ts", System.currentTimeMillis()))
+        runCatching { crackedFile.writeText(arr.toString()) }
+    }
+
+    /** (ssid, key) pairs for export to Android Wi-Fi; skips entries with no SSID/key. */
+    fun crackedEntries(): List<Pair<String, String>> {
+        val arr = crackedJson()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val s = o.optString("ssid"); val k = o.optString("key")
+            if (s.isNotBlank() && k.isNotBlank()) s to k else null
+        }
+    }
+
+    /** Human-readable cracked list for display, or "" when none. */
+    fun crackedList(): String = crackedEntries().joinToString("\n") { "${it.first}  →  ${it.second}" }
 
     /** Deliberate handshake capture files (hs-*.cap), newest first. */
     fun handshakes(): List<String> =

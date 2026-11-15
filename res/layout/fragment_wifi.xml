@@ -61,22 +61,50 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
+        android:layout_marginTop="6dp"
+        android:baselineAligned="false"
         android:orientation="horizontal">
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/wifi_select"
-            style="@style/GhostWire.Button.Ghost"
-            android:layout_width="wrap_content"
+            style="@style/GhostWire.Button.Outlined"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="6dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:minWidth="0dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
             android:text="Multi-select" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/wifi_library"
-            style="@style/GhostWire.Button.Ghost"
-            android:layout_width="wrap_content"
+            android:id="@+id/wifi_wps"
+            style="@style/GhostWire.Button.Outlined"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:text="Saved · wordlists" />
+            android:layout_weight="1"
+            android:layout_marginEnd="6dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:minWidth="0dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:text="WPS scan" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/wifi_library"
+            style="@style/GhostWire.Button.Outlined"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:minWidth="0dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:text="Saved" />
     </LinearLayout>
 
 

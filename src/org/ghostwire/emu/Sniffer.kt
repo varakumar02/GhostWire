@@ -49,7 +49,6 @@ object Sniffer {
         val svc = ComponentName(activity, GhostApduService::class.java)
         sink = onFrame
         ce.setPreferredService(activity, svc)
-        ce.registerPollingLoopPatternFilterForService(svc, ".*", false)
         if (!nfc.setObserveModeEnabled(true)) {
             stop(activity, nfc)
             return "the NFC service refused to enable observe mode"
@@ -62,7 +61,6 @@ object Sniffer {
         runCatching { nfc.setObserveModeEnabled(false) }
         val ce = CardEmulation.getInstance(nfc)
         val svc = ComponentName(activity, GhostApduService::class.java)
-        runCatching { ce.removePollingLoopPatternFilterForService(svc, ".*") }
         runCatching { ce.unsetPreferredService(activity) }
     }
 

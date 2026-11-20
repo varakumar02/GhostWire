@@ -1,8 +1,10 @@
 /*
  * Copyright 2026 Varakumar.  Part of GhostWire (GPLv3).
  *
- * ghostwire_diag — minimal Qualcomm DIAG client over /dev/diag for NV item
- * read/write, for authorized research on your own device.
+ * ghostwire_diag — minimal Qualcomm DIAG client for NV item read/write, for
+ * authorized research on your own device. Talks to the vendor diag-router
+ * (/vendor/bin/diag-router, abstract AF_UNIX SEQPACKET socket) and falls back to
+ * the in-kernel /dev/diag driver when the router isn't running.
  *
  *   ghostwire_diag nvread  <item>
  *   ghostwire_diag nvwrite <item> <up-to-128-byte hex>   (brick risk: own device only)
@@ -11,6 +13,9 @@
  *   write  = [int32 USER_SPACE_DATA_TYPE=0x20][HDLC(cmd + CRC16)]
  *   read   = [int32 type][int32 num_blocks]{ [int32 len][len bytes HDLC payload] }*
  *   session via ioctl(DIAG_IOCTL_SWITCH_LOGGING=7, struct diag_logging_mode_param_t{MEMORY_DEVICE_MODE})
+ * diag-router (Qualcomm router/dm.c, unix.c): same write/read framing; the ioctl
+ * becomes a message [int32 DATA_TYPE_SWITCH_LOGGING=7][param + int32 pid],
+ * answered with [int32 0x00160000][int32 ret].
  * NV_READ_F=0x26 / NV_WRITE_F=0x27, packet = [cmd][item:2 LE][data:128][status:2].
  *
  * NOT yet validated on-device — validate nvread round-trips a known item before
@@ -25,10 +30,13 @@
 #include <errno.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #define USER_SPACE_DATA_TYPE      0x00000020
 #define MEMORY_DEVICE_MODE        2
 #define DIAG_IOCTL_SWITCH_LOGGING 7
+#define DIAG_SWITCH_LOGGING_MASK  0x00160000
 #define DIAG_CON_APSS             0x0001
 #define DIAG_CON_MPSS             0x0002
 #define NV_READ_F  0x26
@@ -45,7 +53,21 @@ struct diag_logging_mode_param_t {
 	uint8_t  reserved;
 	int      peripheral;
 	int      device_mask;
+	int      pid;        /* diag-router only; the kernel ioctl reads up to device_mask */
 } __attribute__((packed));
+
+/* diag-router binds sun_path = "" via strlcpy("\0diag"): an abstract address of
+ * all-zero bytes, sizeof(struct sockaddr_un) long. Connect to exactly that. */
+static int router_connect(void)
+{
+	struct sockaddr_un a;
+	int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+	if (fd < 0) return -1;
+	memset(&a, 0, sizeof a);
+	a.sun_family = AF_UNIX;
+	if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); return -1; }
+	return fd;
+}
 
 /* diag CRC: CRC-CCITT reflected (0x8408), init 0xFFFF, final complement. */
 static uint16_t crc16(const uint8_t *d, size_t n)
@@ -136,16 +158,38 @@ int main(int argc, char **argv)
 		}
 	}
 
-	int fd = open("/dev/diag", O_RDWR);
-	if (fd < 0) { fprintf(stderr, "open /dev/diag: %s\n", strerror(errno)); return 1; }
-
 	struct diag_logging_mode_param_t p;
 	memset(&p, 0, sizeof p);
 	p.req_mode = MEMORY_DEVICE_MODE;
 	p.peripheral_mask = DIAG_CON_APSS | DIAG_CON_MPSS;
 	p.device_mask = 1;                 /* DIAG_MD_LOCAL bit */
-	if (ioctl(fd, DIAG_IOCTL_SWITCH_LOGGING, &p) < 0)
-		fprintf(stderr, "warn: SWITCH_LOGGING: %s (continuing)\n", strerror(errno));
+	p.pid = getpid();
+
+	int fd = router_connect();
+	if (fd >= 0) {
+		uint8_t m[4 + sizeof p];
+		uint32_t t = DIAG_IOCTL_SWITCH_LOGGING;   /* DATA_TYPE_SWITCH_LOGGING */
+		memcpy(m, &t, 4);
+		memcpy(m + 4, &p, sizeof p);
+		if (write(fd, m, sizeof m) < 0) { fprintf(stderr, "router write: %s\n", strerror(errno)); close(fd); return 1; }
+		/* wait for [0x160000][ret]; log/mask updates may arrive first */
+		for (int tries = 0; tries < 20; tries++) {
+			struct pollfd pfd = { fd, POLLIN, 0 };
+			uint8_t r[64];
+			if (poll(&pfd, 1, 100) <= 0) continue;
+			ssize_t n = read(fd, r, sizeof r);
+			if (n >= 8 && rd32(r) == DIAG_SWITCH_LOGGING_MASK) {
+				if ((int32_t)rd32(r + 4) != 0)
+					fprintf(stderr, "warn: router SWITCH_LOGGING ret %d (continuing)\n", (int32_t)rd32(r + 4));
+				break;
+			}
+		}
+	} else {
+		fd = open("/dev/diag", O_RDWR);
+		if (fd < 0) { fprintf(stderr, "no diag-router socket and open /dev/diag: %s\n", strerror(errno)); return 1; }
+		if (ioctl(fd, DIAG_IOCTL_SWITCH_LOGGING, &p) < 0)
+			fprintf(stderr, "warn: SWITCH_LOGGING: %s (continuing)\n", strerror(errno));
+	}
 
 	uint8_t pkt[512];
 	uint32_t type = USER_SPACE_DATA_TYPE;
